@@ -1,0 +1,113 @@
+{
+  "info": {
+    "name": "Regulatory Rules API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Rules",
+      "item": [
+        {
+          "name": "Get All Rules",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/regulatory-rules/rules/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "regulatory-rules", "rules", ""]
+            }
+          }
+        },
+        {
+          "name": "Create Rule",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"New Rule\",\n    \"description\": \"Description\",\n    \"year\": 2023,\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 1000,\n    \"max_population\": 5000,\n    \"site_per_population\": 10,\n    \"base_required_sites\": 5,\n    \"event_offset_percentage\": null,\n    \"reallocation_percentage\": null,\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/regulatory-rules/rules/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "regulatory-rules", "rules", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Rule by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Rule",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"Updated Rule\",\n    \"description\": \"Updated Description\",\n    \"year\": 2023,\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 1000,\n    \"max_population\": 5000,\n    \"site_per_population\": 10,\n    \"base_required_sites\": 5,\n    \"event_offset_percentage\": null,\n    \"reallocation_percentage\": null,\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Delete Rule",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "rule_id",
+      "value": "123e4567-e89b-12d3-a456-426614174000",
+      "type": "string"
+    }
+  ]
+}

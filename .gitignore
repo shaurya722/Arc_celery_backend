@@ -1,0 +1,62 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Django specific files
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.env
+*.venv
+*.virtualenv
+
+# Environment variables
+.env
+*.env
+
+# macOS files
+.DS_Store
+
+# Windows files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Idea specific
+.idea/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+
+# Local settings
+settings_local.py
+
+# Static and media files
+/staticfiles/
+/media/
+
+# Migrations
+*/migrations/*.py
+!*/migrations/__init__.py
+
+# VS Code files
+.vscode/
+
+# Python packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.wheel

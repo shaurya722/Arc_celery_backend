@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collection Sites API Integration</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .site-card { border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 8px; }
+        .site-header { font-size: 18px; font-weight: bold; color: #333; }
+        .site-details { margin-top: 10px; }
+        .site-details div { margin: 5px 0; }
+        .materials { background-color: #f0f0f0; padding: 10px; margin-top: 10px; border-radius: 5px; }
+        .sectors { background-color: #e0e0e0; padding: 10px; margin-top: 10px; border-radius: 5px; }
+        .pagination-info { margin-bottom: 20px; padding: 10px; background-color: #f9f9f9; border-radius: 5px; }
+        .loading { text-align: center; font-size: 20px; }
+        .error { color: red; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Collection Sites</h1>
+    <div id="pagination-info"></div>
+    <div id="loading" class="loading">Loading collection sites...</div>
+    <div id="error" class="error" style="display: none;"></div>
+    <div id="sites-container"></div>
+
+    <script>
+        async function fetchCollectionSites() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/collection-sites/?page=1&limit=5', {
+                    method: 'GET',
+                    headers: {
+                        'accept': 'application/json'
+                    }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // Hide loading
+                document.getElementById('loading').style.display = 'none';
+
+                // Display pagination info
+                const paginationDiv = document.getElementById('pagination-info');
+                paginationDiv.innerHTML = `
+                    <strong>Pagination Info:</strong><br>
+                    Status: ${data.status}<br>
+                    Message: ${data.message}<br>
+                    Total Results: ${data.results}<br>
+                    Current Page: ${data.data.page}<br>
+                    Limit: ${data.data.limit}<br>
+                    Total Pages: ${data.data.totalPages}<br>
+                    Total Documents: ${data.data.totalDocs}<br>
+                    Has Next Page: ${data.data.hasNextPage}<br>
+                    Has Previous Page: ${data.data.hasPrevPage}
+                `;
+
+                // Display sites
+                const container = document.getElementById('sites-container');
+                container.innerHTML = '';
+
+                data.data.docs.forEach(site => {
+                    const siteDiv = document.createElement('div');
+                    siteDiv.className = 'site-card';
+
+                    const materials = [];
+                    if (site.paints_and_coatings) materials.push('Paints & Coatings');
+                    if (site.hhw_hsp) materials.push('HHW/HSP');
+                    if (site.alarms) materials.push('Alarms');
+                    if (site.lights) materials.push('Lights');
+                    if (site.solvents) materials.push('Solvents');
+                    if (site.pesticides) materials.push('Pesticides');
+                    if (site.fertilizers) materials.push('Fertilizers');
+                    if (site.paintshare) materials.push('PaintShare');
+
+                    const sectors = [];
+                    if (site.residential) sectors.push('Residential');
+                    if (site.commercial) sectors.push('Commercial');
+                    if (site.industrial) sectors.push('Industrial');
+                    if (site.institutional) sectors.push('Institutional');
+
+                    siteDiv.innerHTML = `
+                        <div class="site-header">${site.collection_site_name}</div>
+                        <div class="site-details">
+                            <div><strong>ID:</strong> ${site.id}</div>
+                            <div><strong>Collection Site Name:</strong> ${site.collection_site_name}</div>
+                            <div><strong>Collection Site Type:</strong> ${site.collection_site_type}</div>
+                            <div><strong>Operator Type:</strong> ${site.operator_type || 'null'}</div>
+                            <div><strong>Site ID:</strong> ${site.site_id || 'null'}</div>
+                            <div><strong>Service Partner:</strong> ${site.service_partner || 'null'}</div>
+                            <div><strong>Address Line 1:</strong> ${site.address_line_1}</div>
+                            <div><strong>Address Line 2:</strong> ${site.address_line_2 || 'null'}</div>
+                            <div><strong>Address City:</strong> ${site.address_city}</div>
+                            <div><strong>Address Postal Code:</strong> ${site.address_postal_code}</div>
+                            <div><strong>Service Area:</strong> ${site.service_area || 'null'}</div>
+                            <div><strong>Address Latitude:</strong> ${site.address_latitude || 'null'}</div>
+                            <div><strong>Address Longitude:</strong> ${site.address_longitude || 'null'}</div>
+                            <div><strong>Paints and Coatings:</strong> ${site.paints_and_coatings}</div>
+                            <div><strong>HHW/HSP:</strong> ${site.hhw_hsp}</div>
+                            <div><strong>Alarms:</strong> ${site.alarms}</div>
+                            <div><strong>Lights:</strong> ${site.lights}</div>
+                            <div><strong>Paints and Coatings 2:</strong> ${site.paints_and_coatings2}</div>
+                            <div><strong>Start Date Paints Coating:</strong> ${site.start_date_paints_coating || 'null'}</div>
+                            <div><strong>End Date Paints Coatings:</strong> ${site.end_date_paints_coatings || 'null'}</div>
+                            <div><strong>Lights 3:</strong> ${site.lights3}</div>
+                            <div><strong>Lights Start Date:</strong> ${site.lights_start_date || 'null'}</div>
+                            <div><strong>Lights End Date:</strong> ${site.lights_end_date || 'null'}</div>
+                            <div><strong>Solvents:</strong> ${site.solvents}</div>
+                            <div><strong>Solvents Start Date:</strong> ${site.solvents_start_date || 'null'}</div>
+                            <div><strong>Solvents End Date:</strong> ${site.solvents_end_date || 'null'}</div>
+                            <div><strong>Pesticides:</strong> ${site.pesticides}</div>
+                            <div><strong>Pesticides Start Date:</strong> ${site.pesticides_start_date || 'null'}</div>
+                            <div><strong>Pesticides End Date:</strong> ${site.pesticides_end_date || 'null'}</div>
+                            <div><strong>Fertilizers:</strong> ${site.fertilizers}</div>
+                            <div><strong>Fertilizers Start Date:</strong> ${site.fertilizers_start_date || 'null'}</div>
+                            <div><strong>Fertilizers End Date:</strong> ${site.fertilizers_end_date || 'null'}</div>
+                            <div><strong>PaintShare:</strong> ${site.paintshare}</div>
+                            <div><strong>PaintShare Start Date:</strong> ${site.paintshare_start_date || 'null'}</div>
+                            <div><strong>PaintShare End Date:</strong> ${site.paintshare_end_date || 'null'}</div>
+                            <div><strong>Residential:</strong> ${site.residential}</div>
+                            <div><strong>Commercial:</strong> ${site.commercial}</div>
+                            <div><strong>Industrial:</strong> ${site.industrial}</div>
+                            <div><strong>Institutional:</strong> ${site.institutional}</div>
+                            <div><strong>Community:</strong> ${site.community_detail ? site.community_detail.name : 'null'}</div>
+                            <div><strong>Region:</strong> ${site.region_detail ? site.region_detail.name : 'null'}</div>
+                            <div class="materials"><strong>Materials Collected:</strong> ${materials.length > 0 ? materials.join(', ') : 'None'}</div>
+                            <div class="sectors"><strong>Collection Sectors:</strong> ${sectors.length > 0 ? sectors.join(', ') : 'None'}</div>
+                            <div><strong>Created:</strong> ${new Date(site.created_at).toLocaleString()}</div>
+                            <div><strong>Updated:</strong> ${new Date(site.updated_at).toLocaleString()}</div>
+                        </div>
+                    `;
+
+                    container.appendChild(siteDiv);
+                });
+
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = `Error loading data: ${error.message}`;
+            }
+        }
+
+        // Fetch data on page load
+        fetchCollectionSites();
+    </script>
+</body>
+</html>

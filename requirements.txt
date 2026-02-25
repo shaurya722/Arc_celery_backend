@@ -1,0 +1,28 @@
+# Django and REST Framework
+Django>=4.2,<5.0
+djangorestframework>=3.14.0
+django-cors-headers>=4.3.0
+django-filter>=23.5
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Authentication
+djangorestframework-simplejwt>=5.3.1
+PyJWT>=2.8.0
+
+# Utilities
+python-dotenv>=1.0.0
+gunicorn>=21.2.0
+whitenoise>=6.6.0
+
+# API Documentation
+drf-spectacular>=0.27.0
+
+# Password hashing
+bcrypt>=4.1.2
+
+# CSV/Excel handling
+pandas>=2.1.0
+openpyxl>=3.1.2
+
