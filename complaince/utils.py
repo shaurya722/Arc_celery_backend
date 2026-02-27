@@ -20,20 +20,25 @@ def calculate_required_sites_from_rule(
     Args:
         community: Community instance
         program: Program name (Paint, Lighting, Solvents, Pesticides)
-        year: Year for the rule (defaults to community.year)
+        year: Year for the rule (defaults to latest census year for community)
     
     Returns:
         Number of required sites or None if no rule found
     """
     if year is None:
-        year = community.year
+        # Get the latest census year for this community
+        latest_census_year = community.census_years.order_by('-year').first()
+        if latest_census_year:
+            year = latest_census_year.year
+        else:
+            return None  # No census year assigned to this community
     
     population = community.population
     
     # Query for active Site Requirements rules matching program, year, and category
     rules = RegulatoryRule.objects.filter(
         program=program,
-        year=year,
+        census_years__year=year,  # Updated to use census_years many-to-many
         rule_type='Site Requirements',
         is_active=True
     ).filter(
@@ -116,7 +121,7 @@ def calculate_required_sites(
     Args:
         community: Community instance
         program: Program name
-        year: Year for the rule (defaults to community.year)
+        year: Year for the rule (defaults to latest census year for community)
     
     Returns:
         Number of required sites
@@ -154,9 +159,9 @@ def count_actual_sites(community: Community, program: str) -> int:
     if not program_field:
         return 0
     
-    # Count active sites with the program enabled
+    # Count active sites with the program enabled that are associated with this community
     filter_kwargs = {
-        'community': community,
+        'communities': community,  # Updated to use many-to-many relationship
         'is_active': True,
         program_field: True
     }
@@ -175,7 +180,7 @@ def calculate_compliance(
     Args:
         community: Community instance
         program: Program name
-        year: Year for the rule (defaults to community.year)
+        year: Year for the rule (defaults to latest census year for community)
     
     Returns:
         Dictionary with compliance metrics:

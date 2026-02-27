@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'community.apps.CommunityConfig',
     'sites.apps.SitesConfig',
     'complaince',
+    'test_check',
     'django_celery_beat',
     'drf_spectacular',
 ]

@@ -1,123 +1,115 @@
 from rest_framework.views import APIView
-# APIView provides the base class for API views in Django REST Framework
 from rest_framework.response import Response
-# Response is used to return HTTP responses with data
 from rest_framework import status
-# status contains HTTP status codes
 from rest_framework.pagination import PageNumberPagination
-from django.shortcuts import get_object_or_404
-# get_object_or_404 raises 404 if object not found
 from django.db.models import Q
-# Q is used for complex database queries
-from .models import Site
-# Importing the models for database operations
-from .serializers import SiteSerializer
-# Importing serializers for data validation and conversion
+from .models import Site, SiteCensusData
+from .serializers import SiteSerializer, SiteCensusDataSerializer
+
+
+class SitePagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'limit'
+    page_query_param = 'page'
+    max_page_size = 100
+
 
 class SiteListCreate(APIView):
     """
-    APIView for listing all Sites and creating new ones.
-    
-    GET /sites/: Returns a list of all sites with optional search, filters, sorting, and pagination.
-    POST /sites/: Creates a new site.
+    API for Site census data in flat format.
+    Returns all site census data records with site and community information.
     """
-    def get(self, request):
-        # Retrieve all Site instances initially
-        queryset = Site.objects.all()
+    pagination_class = SitePagination()
 
-        # Search functionality
-        search_query = request.GET.get('search', '')
-        if search_query:
+    def get(self, request):
+        # Query SiteCensusData instead of Site for flat format
+        queryset = SiteCensusData.objects.select_related('site', 'census_year', 'community').all()
+
+        # Search by site name
+        search = request.query_params.get('search', None)
+        if search:
             queryset = queryset.filter(
-                Q(site_name__icontains=search_query) |
-                Q(site_type__icontains=search_query) |
-                Q(address_city__icontains=search_query) |
-                Q(address_postal_code__icontains=search_query)
+                Q(site__site_name__icontains=search) |
+                Q(address_city__icontains=search)
             )
 
         # Filters
-        is_active_filter = request.GET.get('is_active')
-        if is_active_filter is not None:
-            is_active_bool = is_active_filter.lower() in ('true', '1', 'yes')
-            queryset = queryset.filter(is_active=is_active_bool)
+        year = request.query_params.get('year', None)
+        if year:
+            queryset = queryset.filter(census_year__year=year)
 
-        site_type = request.GET.get('site_type')
+        site_type = request.query_params.get('site_type', None)
         if site_type:
             queryset = queryset.filter(site_type=site_type)
 
-        operator_type = request.GET.get('operator_type')
+        operator_type = request.query_params.get('operator_type', None)
         if operator_type:
             queryset = queryset.filter(operator_type=operator_type)
 
-        community = request.GET.get('community')
+        community = request.query_params.get('community', None)
         if community:
-            queryset = queryset.filter(community=community)
+            queryset = queryset.filter(community__id=community)
 
-        region = request.GET.get('region')
+        region = request.query_params.get('region', None)
         if region:
             queryset = queryset.filter(region=region)
 
-        # Sorting
-        sort_by = request.GET.get('sort', 'created_at')  # Default sort by created_at
-        queryset = queryset.order_by(sort_by)
+        is_active = request.query_params.get('is_active', None)
+        if is_active:
+            is_active_bool = is_active.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(is_active=is_active_bool)
+
+        # Sort
+        sort = request.query_params.get('sort', 'site__site_name')
+        queryset = queryset.order_by(sort)
 
         # Pagination
-        paginator = PageNumberPagination()
-        paginator.page_size = 10
-        paginator.page_size_query_param = 'page_size'
-        paginator.max_page_size = 100
-        page = paginator.paginate_queryset(queryset, request)
-        if page is not None:
-            serializer = SiteSerializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
-        else:
-            serializer = SiteSerializer(queryset, many=True)
-            return Response(serializer.data)
+        paginator = self.pagination_class
+        paginated_queryset = paginator.paginate_queryset(queryset, request)
+        serializer = SiteCensusDataSerializer(paginated_queryset, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
-        # Deserialize the incoming JSON data
-        serializer = SiteSerializer(data=request.data)
+        # Create new site census data record
+        serializer = SiteCensusDataSerializer(data=request.data)
         if serializer.is_valid():
-            # Save the new site to the database
-            serializer.save()
-            # Return the created data with 201 status
+            site_census_data = serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        # Return validation errors with 400 status
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 class SiteDetail(APIView):
-    """
-    APIView for retrieving, updating, and deleting a specific Site.
+    """CRUD operations for single site census data record"""
     
-    GET /sites/<pk>/: Returns details of a specific site (pk is UUID).
-    PUT /sites/<pk>/: Updates a specific site.
-    DELETE /sites/<pk>/: Deletes a specific site.
-    """
+    def get_object(self, pk):
+        try:
+            return SiteCensusData.objects.select_related('site', 'census_year', 'community').get(pk=pk)
+        except SiteCensusData.DoesNotExist:
+            return None
+
     def get(self, request, pk):
-        # Retrieve the site by primary key (UUID), raise 404 if not found
-        site = get_object_or_404(Site, pk=pk)
-        # Serialize the site instance
-        serializer = SiteSerializer(site)
-        # Return the serialized data
+        """Retrieve a single site census data record"""
+        site_census_data = self.get_object(pk)
+        if not site_census_data:
+            return Response({"error": "Site census data not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SiteCensusDataSerializer(site_census_data)
         return Response(serializer.data)
 
     def put(self, request, pk):
-        # Retrieve the site by primary key
-        site = get_object_or_404(Site, pk=pk)
-        # Deserialize and validate the update data
-        serializer = SiteSerializer(site, data=request.data)
+        """Update site census data record"""
+        site_census_data = self.get_object(pk)
+        if not site_census_data:
+            return Response({"error": "Site census data not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SiteCensusDataSerializer(site_census_data, data=request.data, partial=True)
         if serializer.is_valid():
-            # Save the updated site
-            serializer.save()
-            # Return the updated data
+            site_census_data = serializer.save()
             return Response(serializer.data)
-        # Return validation errors
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
-        # Retrieve the site by primary key
-        site = get_object_or_404(Site, pk=pk)
-        # Delete the site from the database
-        site.delete()
-        # Return 204 No Content status
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        """Delete a site census data record"""
+        site_census_data = self.get_object(pk)
+        if not site_census_data:
+            return Response({"error": "Site census data not found"}, status=status.HTTP_404_NOT_FOUND)
+        site_census_data.delete()
+        return Response({"message": "Site census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
