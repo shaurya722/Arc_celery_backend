@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.pagination import PageNumberPagination
+from django.db.models import F, Exists, OuterRef, Q
 from .models import ComplianceCalculation
 from .serializers import ComplianceCalculationSerializer
 from .tasks import calculate_community_compliance
@@ -26,16 +27,36 @@ class ComplianceCalculationListCreate(APIView):
     ordering_fields = ['created_at', 'compliance_rate', 'shortfall']
     
     def get(self, request):
-        calculations = ComplianceCalculation.objects.all().select_related('community', 'created_by')
+        from community.models import CommunityCensusData
         
-        # Apply filters
+        # Start with all compliance records
+        calculations = ComplianceCalculation.objects.all().select_related('community', 'census_year', 'created_by')
+        
+        # Exclude compliance records for communities that are inactive in their census year
+        inactive_community_census = CommunityCensusData.objects.filter(is_active=False)
+        
+        # Create exclude filter for inactive combinations
+        exclude_filters = Q()
+        for census_data in inactive_community_census:
+            exclude_filters |= Q(
+                community_id=census_data.community_id,
+                census_year_id=census_data.census_year_id
+            )
+        
+        if exclude_filters:
+            calculations = calculations.exclude(exclude_filters)
+        
+        # Apply user filters
         program = request.query_params.get('program')
         community = request.query_params.get('community')
+        census_year = request.query_params.get('census_year')
         
         if program:
             calculations = calculations.filter(program=program)
         if community:
             calculations = calculations.filter(community__id=community)
+        if census_year:
+            calculations = calculations.filter(census_year__id=census_year)
         
         # Apply ordering
         ordering = request.query_params.get('ordering', '-created_at')
@@ -54,10 +75,11 @@ class ComplianceCalculationListCreate(APIView):
     
     def post(self, request):
         """
-        Trigger compliance calculation for a specific community.
+        Trigger compliance calculation for a specific community and census year.
         """
         community_id = request.data.get('community')
         program = request.data.get('program')
+        census_year_id = request.data.get('census_year')
         
         if not community_id:
             return Response(
@@ -65,14 +87,49 @@ class ComplianceCalculationListCreate(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Trigger async calculation
-        task = calculate_community_compliance.delay(str(community_id), program)
+        # Validate that the community exists
+        try:
+            from community.models import Community, CensusYear
+            community = Community.objects.get(id=community_id)
+        except Community.DoesNotExist:
+            return Response(
+                {'error': 'Community not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get census year
+        if census_year_id:
+            try:
+                census_year = CensusYear.objects.get(id=census_year_id)
+            except CensusYear.DoesNotExist:
+                return Response(
+                    {'error': 'Census year not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            # Get the latest census year for this community
+            latest_census_data = community.census_data.order_by('-census_year__year').first()
+            if latest_census_data:
+                census_year = latest_census_data.census_year
+            else:
+                return Response(
+                    {'error': 'No census data found for this community'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Trigger async calculation (will create zero values if community is inactive)
+        task = calculate_community_compliance.delay(
+            str(community_id), 
+            program, 
+            census_year_id
+        )
         
         return Response({
             'message': 'Compliance calculation triggered',
             'task_id': task.id,
             'community': community_id,
-            'program': program or 'all'
+            'program': program or 'all',
+            'census_year': census_year_id or 'latest'
         }, status=status.HTTP_202_ACCEPTED)
 
 
@@ -82,7 +139,7 @@ class ComplianceCalculationDetail(APIView):
     """
     def get_object(self, pk):
         try:
-            return ComplianceCalculation.objects.select_related('community', 'created_by').get(pk=pk)
+            return ComplianceCalculation.objects.select_related('community', 'census_year', 'created_by').get(pk=pk)
         except ComplianceCalculation.DoesNotExist:
             return None
     

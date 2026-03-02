@@ -3,12 +3,19 @@ from django.db import models
 
 class ComplianceCalculation(models.Model):
     """
-    Stores compliance calculation results.
+    Stores compliance calculation results for a specific census year.
     """
     community = models.ForeignKey(
         'community.Community',
         on_delete=models.CASCADE,
         related_name='compliance_calculations'
+    )
+    census_year = models.ForeignKey(
+        'community.CensusYear',
+        on_delete=models.CASCADE,
+        related_name='compliance_calculations',
+        null=True,
+        blank=True
     )
     program = models.CharField(max_length=100)
     required_sites = models.IntegerField()
@@ -30,11 +37,13 @@ class ComplianceCalculation(models.Model):
     class Meta:
         db_table = 'compliance_calculations'
         ordering = ['-calculation_date']
-        unique_together = [['community', 'program']]
+        unique_together = [['community', 'program', 'census_year']]
         indexes = [
-            models.Index(fields=['community', 'program']),
+            models.Index(fields=['community', 'program', 'census_year']),
             models.Index(fields=['calculation_date']),
+            models.Index(fields=['census_year']),
         ]
     
     def __str__(self):
-        return f"{self.community.name} - {self.program}: {self.compliance_rate}%"
+        year_str = f" ({self.census_year.year})" if self.census_year else ""
+        return f"{self.community.name} - {self.program}{year_str}: {self.compliance_rate}%"

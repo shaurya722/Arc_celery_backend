@@ -25,7 +25,9 @@ SECRET_KEY = 'django-insecure-hj+2+o*ywt0200s9a+ze4u#x79_j2t-s&@fzpx7-zn_cr!=)r*
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    '*'
+]
 
 
 # Application definition
@@ -140,6 +142,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS settings
 CORS_ALLOW_ALL_ORIGINS = True
+
+# CSRF settings for ngrok
+CSRF_TRUSTED_ORIGINS = [
+    'https://7526-203-88-135-90.ngrok-free.app',
+    'http://7526-203-88-135-90.ngrok-free.app',
+]
 
 # Celery Configuration
 CELERY_BROKER_URL = 'redis://127.0.0.1:6379/0'

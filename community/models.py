@@ -16,6 +16,131 @@ class CensusYear(models.Model):
 
     def __str__(self):
         return str(self.year)
+    
+    def save(self, *args, **kwargs):
+        """
+        Auto-create census data records for all active communities and sites
+        when a new census year is created.
+        """
+        is_new = self.pk is None
+        super().save(*args, **kwargs)
+        
+        if is_new:
+            # Import here to avoid circular imports
+            from sites.models import Site, SiteCensusData
+            from regulatory_rules.models import RegulatoryRule, RegulatoryRuleCensusData
+            
+            # Get communities that have their latest census data as active
+            active_communities = []
+            for community in Community.objects.all():
+                latest_census = community.census_data.order_by('-census_year__year').first()
+                if latest_census and latest_census.is_active:
+                    active_communities.append(community)
+            
+            # Create CommunityCensusData for each active community
+            for community in active_communities:
+                # Get the latest census data for this community to copy values
+                latest_census = community.census_data.filter(
+                    is_active=True
+                ).order_by('-census_year__year').first()
+                
+                if latest_census:
+                    CommunityCensusData.objects.create(
+                        community=community,
+                        census_year=self,
+                        population=latest_census.population,
+                        tier=latest_census.tier,
+                        region=latest_census.region,
+                        zone=latest_census.zone,
+                        province=latest_census.province,
+                        is_active=True,
+                        start_date=latest_census.start_date,
+                        end_date=latest_census.end_date,
+                    )
+            
+            # Get sites that have their latest census data as active
+            active_sites = []
+            for site in Site.objects.all():
+                latest_census = site.census_data.order_by('-census_year__year').first()
+                if latest_census and latest_census.is_active:
+                    active_sites.append(site)
+            
+            # Create SiteCensusData for each active site
+            for site in active_sites:
+                # Get the latest census data for this site to copy values
+                latest_census = site.census_data.filter(
+                    is_active=True
+                ).order_by('-census_year__year').first()
+                
+                if latest_census:
+                    SiteCensusData.objects.create(
+                        site=site,
+                        census_year=self,
+                        community=latest_census.community,
+                        site_type=latest_census.site_type,
+                        operator_type=latest_census.operator_type,
+                        service_partner=latest_census.service_partner,
+                        address_line_1=latest_census.address_line_1,
+                        address_line_2=latest_census.address_line_2,
+                        address_city=latest_census.address_city,
+                        address_postal_code=latest_census.address_postal_code,
+                        region=latest_census.region,
+                        service_area=latest_census.service_area,
+                        address_latitude=latest_census.address_latitude,
+                        address_longitude=latest_census.address_longitude,
+                        latitude=latest_census.latitude,
+                        longitude=latest_census.longitude,
+                        is_active=True,
+                        site_start_date=latest_census.site_start_date,
+                        site_end_date=latest_census.site_end_date,
+                        program_paint=latest_census.program_paint,
+                        program_paint_start_date=latest_census.program_paint_start_date,
+                        program_paint_end_date=latest_census.program_paint_end_date,
+                        program_lights=latest_census.program_lights,
+                        program_lights_start_date=latest_census.program_lights_start_date,
+                        program_lights_end_date=latest_census.program_lights_end_date,
+                        program_solvents=latest_census.program_solvents,
+                        program_solvents_start_date=latest_census.program_solvents_start_date,
+                        program_solvents_end_date=latest_census.program_solvents_end_date,
+                        program_pesticides=latest_census.program_pesticides,
+                        program_pesticides_start_date=latest_census.program_pesticides_start_date,
+                        program_pesticides_end_date=latest_census.program_pesticides_end_date,
+                        program_fertilizers=latest_census.program_fertilizers,
+                        program_fertilizers_start_date=latest_census.program_fertilizers_start_date,
+                        program_fertilizers_end_date=latest_census.program_fertilizers_end_date,
+                    )
+            
+            # Get regulatory rules that have their latest census data as active
+            active_rules = []
+            for rule in RegulatoryRule.objects.all():
+                latest_census = rule.census_data.order_by('-census_year__year').first()
+                if latest_census and latest_census.is_active:
+                    active_rules.append(rule)
+            
+            # Create RegulatoryRuleCensusData for each active rule
+            for rule in active_rules:
+                # Get the latest census data for this rule to copy values
+                latest_census = rule.census_data.filter(
+                    is_active=True
+                ).order_by('-census_year__year').first()
+                
+                if latest_census:
+                    RegulatoryRuleCensusData.objects.create(
+                        regulatory_rule=rule,
+                        census_year=self,
+                        program=latest_census.program,
+                        category=latest_census.category,
+                        rule_type=latest_census.rule_type,
+                        min_population=latest_census.min_population,
+                        max_population=latest_census.max_population,
+                        site_per_population=latest_census.site_per_population,
+                        base_required_sites=latest_census.base_required_sites,
+                        event_offset_percentage=latest_census.event_offset_percentage,
+                        reallocation_percentage=latest_census.reallocation_percentage,
+                        is_active=True,
+                        start_date=latest_census.start_date,
+                        end_date=latest_census.end_date,
+                    )
 
 
 class Community(models.Model):

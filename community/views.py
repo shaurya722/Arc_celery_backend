@@ -4,7 +4,7 @@ from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 from .models import Community, CommunityCensusData, CensusYear
-from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer
+from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer, CensusYearWithDataSerializer
 from complaince.tasks import calculate_community_compliance
 
 
@@ -17,46 +17,46 @@ class CommunityPagination(PageNumberPagination):
 
 class CommunityListCreate(APIView):
     """
-    API for Community census data in flat format.
-    Returns all census data records with community information.
+    API for Community static identity with nested census data.
+    Returns communities with their census_years as nested arrays.
     """
     pagination_class = CommunityPagination()
 
     def get(self, request):
-        # Query CommunityCensusData instead of Community for flat format
-        queryset = CommunityCensusData.objects.select_related('community', 'census_year').all()
+        # Query Community objects with prefetch_related for census data
+        queryset = Community.objects.prefetch_related('census_data__census_year').all()
 
-        # Search by community name
+        # Search by name
         search = request.query_params.get('search', None)
         if search:
-            queryset = queryset.filter(Q(community__name__icontains=search))
+            queryset = queryset.filter(Q(name__icontains=search))
 
-        # Filters
+        # Filters for census data (will filter communities that have matching census data)
         year = request.query_params.get('year', None)
         if year:
-            queryset = queryset.filter(census_year__year=year)
+            queryset = queryset.filter(census_data__census_year__year=year)
 
         tier = request.query_params.get('tier', None)
         if tier:
-            queryset = queryset.filter(tier=tier)
+            queryset = queryset.filter(census_data__tier=tier)
 
         region = request.query_params.get('region', None)
         if region:
-            queryset = queryset.filter(region=region)
+            queryset = queryset.filter(census_data__region=region)
 
         is_active = request.query_params.get('is_active', None)
         if is_active:
             is_active_bool = is_active.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(is_active=is_active_bool)
+            queryset = queryset.filter(census_data__is_active=is_active_bool)
 
         # Sort
-        sort = request.query_params.get('sort', 'community__name')
+        sort = request.query_params.get('sort', 'name')
         queryset = queryset.order_by(sort)
 
         # Pagination
         paginator = self.pagination_class
         paginated_queryset = paginator.paginate_queryset(queryset, request)
-        serializer = CommunityCensusDataSerializer(paginated_queryset, many=True)
+        serializer = CommunitySerializer(paginated_queryset, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
@@ -216,22 +216,29 @@ class CommunityCensusDataDetail(APIView):
 
 
 class CensusYearListCreate(APIView):
-    """List and Create census years"""
+    """
+    API for CensusYear with associated communities and sites data.
+    Returns all census years with their communities and sites.
+    """
     pagination_class = CommunityPagination()
 
     def get(self, request):
-        """List all census years"""
-        queryset = CensusYear.objects.all().order_by('-year')
-        
-        # Search by year
-        year = request.query_params.get('year', None)
-        if year:
-            queryset = queryset.filter(year=year)
-        
+        # Query CensusYear with prefetch_related for efficiency
+        queryset = CensusYear.objects.prefetch_related(
+            'community_data__community',
+            'site_data__site',
+            'site_data__community',
+            'regulatory_rule_data__regulatory_rule'
+        ).all()
+
+        # Sort
+        sort = request.query_params.get('sort', '-year')
+        queryset = queryset.order_by(sort)
+
         # Pagination
         paginator = self.pagination_class
         paginated_queryset = paginator.paginate_queryset(queryset, request)
-        serializer = CensusYearSerializer(paginated_queryset, many=True)
+        serializer = CensusYearWithDataSerializer(paginated_queryset, many=True)
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
