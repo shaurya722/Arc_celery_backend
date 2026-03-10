@@ -3,8 +3,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
-from .models import Community, CommunityCensusData, CensusYear
-from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer, CensusYearWithDataSerializer
+from uuid import UUID
+from .models import Community, CommunityCensusData, CensusYear, AdjacentCommunity
+from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer, CensusYearWithDataSerializer, AdjacentCommunitySerializer, AdjacentCommunityReallocationSerializer, MapDataSerializer
 from complaince.tasks import calculate_community_compliance
 
 
@@ -118,9 +119,45 @@ class CommunityCensusDataListCreate(APIView):
         if max_population:
             queryset = queryset.filter(population__lte=max_population)
 
-        # Sort
-        sort = request.query_params.get('sort', 'community__name')
-        queryset = queryset.order_by(sort)
+        # Sort - handle valid field names
+        sort_by = request.query_params.get('sort', 'community__name')  # Default sort by community name
+        
+        # Map of allowed sort fields to prevent FieldError
+        valid_sort_fields = {
+            # Direct model fields
+            'id': 'id',
+            '-id': '-id',
+            'population': 'population',
+            '-population': '-population',
+            'tier': 'tier',
+            '-tier': '-tier',
+            'region': 'region',
+            '-region': '-region',
+            'zone': 'zone',
+            '-zone': '-zone',
+            'province': 'province',
+            '-province': '-province',
+            'is_active': 'is_active',
+            '-is_active': '-is_active',
+            'created_at': 'created_at',
+            '-created_at': '-created_at',
+            'updated_at': 'updated_at',
+            '-updated_at': '-updated_at',
+            'start_date': 'start_date',
+            '-start_date': '-start_date',
+            'end_date': 'end_date',
+            '-end_date': '-end_date',
+            
+            # Related field sorting
+            'name': 'community__name',
+            '-name': '-community__name',
+            'year': 'census_year__year',
+            '-year': '-census_year__year',
+        }
+        
+        # Use valid sort field or default to 'community__name'
+        sort_field = valid_sort_fields.get(sort_by, 'community__name')
+        queryset = queryset.order_by(sort_field)
 
         # Pagination
         paginator = self.pagination_class
@@ -129,7 +166,7 @@ class CommunityCensusDataListCreate(APIView):
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
-        serializer = CommunityCensusDataSerializer(data=request.data)
+        serializer = CommunityCensusDataSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
             # Trigger compliance calculation for the community
@@ -160,7 +197,7 @@ class CommunityDetail(APIView):
         census_data = self.get_object(pk)
         if not census_data:
             return Response({"error": "Census data not found"}, status=status.HTTP_404_NOT_FOUND)
-        serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True)
+        serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
             calculate_community_compliance.delay(str(census_data.community.id))
@@ -198,7 +235,7 @@ class CommunityCensusDataDetail(APIView):
         census_data = self.get_object(pk)
         if not census_data:
             return Response({"error": "Community census data not found"}, status=status.HTTP_404_NOT_FOUND)
-        serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True)
+        serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
             # Trigger compliance calculation
@@ -215,11 +252,64 @@ class CommunityCensusDataDetail(APIView):
         return Response({"message": "Community census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
+class YearDropdown(APIView):
+    """
+    API for Year dropdown with CRUD operations.
+    Returns simple year list for dropdowns and supports full CRUD.
+    """
+
+    def get(self, request):
+        """Get all years for dropdown"""
+        years = CensusYear.objects.values('id', 'year').order_by('-year')
+        return Response({
+            'years': list(years),
+            'total': len(years)
+        })
+
+    def post(self, request):
+        """Create a new year"""
+        serializer = CensusYearSerializer(data=request.data)
+        if serializer.is_valid():
+            census_year = serializer.save()
+            return Response({
+                'id': census_year.id,
+                'year': census_year.year,
+                'message': f'Year {census_year.year} created successfully'
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def put(self, request, pk=None):
+        """Update a year"""
+        try:
+            census_year = CensusYear.objects.get(pk=pk)
+        except CensusYear.DoesNotExist:
+            return Response({"error": "Year not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CensusYearSerializer(census_year, data=request.data, partial=True)
+        if serializer.is_valid():
+            census_year = serializer.save()
+            return Response({
+                'id': census_year.id,
+                'year': census_year.year,
+                'message': f'Year {census_year.year} updated successfully'
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk=None):
+        """Delete a year"""
+        try:
+            census_year = CensusYear.objects.get(pk=pk)
+        except CensusYear.DoesNotExist:
+            return Response({"error": "Year not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        year_value = census_year.year
+        census_year.delete()
+        return Response({
+            'message': f'Year {year_value} deleted successfully'
+        }, status=status.HTTP_204_NO_CONTENT)
+
+
 class CensusYearListCreate(APIView):
-    """
-    API for CensusYear with associated communities and sites data.
-    Returns all census years with their communities and sites.
-    """
     pagination_class = CommunityPagination()
 
     def get(self, request):
@@ -285,3 +375,100 @@ class CensusYearDetail(APIView):
             return Response({"error": "Census year not found"}, status=status.HTTP_404_NOT_FOUND)
         census_year.delete()
         return Response({"message": "Census year deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+
+
+class AdjacentCommunityReallocationListCreate(APIView):
+    """List all adjacent communities with reallocation data or create new ones"""
+
+    def get(self, request):
+        """List all adjacent communities with detailed reallocation information"""
+        adjacencies = AdjacentCommunity.objects.select_related(
+            'from_community', 'census_year'
+        ).prefetch_related('to_communities').all()
+
+        # Filters
+        from_community = request.query_params.get('from_community')
+        if from_community:
+            # Check if it's a UUID or name
+            try:
+                # Try to parse as UUID
+                UUID(from_community)
+                # If successful, filter by ID
+                adjacencies = adjacencies.filter(from_community__id=from_community)
+            except ValueError:
+                # Not a UUID, filter by name
+                adjacencies = adjacencies.filter(from_community__name__icontains=from_community)
+
+        census_year = request.query_params.get('census_year')
+        if census_year:
+            adjacencies = adjacencies.filter(census_year__year=census_year)
+
+        serializer = AdjacentCommunityReallocationSerializer(adjacencies, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        """Create new adjacent community with basic adjacency info"""
+        serializer = AdjacentCommunitySerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdjacentCommunityReallocationDetail(APIView):
+    """Get detailed reallocation information for a specific adjacency"""
+
+    def get_object(self, pk):
+        try:
+            return AdjacentCommunity.objects.select_related(
+                'from_community', 'census_year'
+            ).prefetch_related('to_communities').get(pk=pk)
+        except AdjacentCommunity.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        adjacency = self.get_object(pk)
+        if not adjacency:
+            return Response({'error': 'Adjacent community not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdjacentCommunityReallocationSerializer(adjacency)
+        return Response(serializer.data)
+
+    def put(self, request, pk):
+        adjacency = self.get_object(pk)
+        if not adjacency:
+            return Response({'error': 'Adjacent community not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdjacentCommunitySerializer(adjacency, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, pk):
+        adjacency = self.get_object(pk)
+        if not adjacency:
+            return Response({'error': 'Adjacent community not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = AdjacentCommunitySerializer(adjacency, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        adjacency = self.get_object(pk)
+        if not adjacency:
+            return Response({'error': 'Adjacent community not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        adjacency.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MapDataView(APIView):
+    """API view for map data providing sites and municipalities for the React component"""
+
+    def get(self, request):
+        """Get map data (sites and municipalities) for the React component"""
+        serializer = MapDataSerializer({}, context={'request': request})
+        return Response(serializer.data)

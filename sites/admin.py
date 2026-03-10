@@ -12,8 +12,8 @@ class SiteAdmin(admin.ModelAdmin):
 
 @admin.register(SiteCensusData)
 class SiteCensusDataAdmin(admin.ModelAdmin):
-    list_display = ['site', 'census_year', 'site_type', 'operator_type', 'is_active', 'region', 'created_at']
-    list_filter = ['census_year', 'is_active', 'site_type', 'operator_type', 'region']
+    list_display = ['site', 'census_year', 'community', 'site_type', 'operator_type', 'program_paint', 'program_lights', 'program_solvents', 'program_pesticides', 'is_active', 'region', 'created_at']
+    list_filter = ['census_year', 'community', 'is_active', 'site_type', 'operator_type', 'region', 'program_paint', 'program_lights', 'program_solvents', 'program_pesticides']
     search_fields = ['site__site_name', 'address_city']
     ordering = ['-census_year__year', 'site__site_name']
     readonly_fields = ['created_at', 'updated_at']

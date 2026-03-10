@@ -1,11 +1,12 @@
 {
   "info": {
-    "name": "Regulatory Rules API",
+    "name": "ArcGIS Backend API Collection",
+    "description": "Complete API collection for ArcGIS Backend with Regulatory Rules, Community Census Data, Sites, Compliance Calculations, and Test Check endpoints",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
     {
-      "name": "Rules",
+      "name": "Regulatory Rules",
       "item": [
         {
           "name": "Get All Rules",
@@ -18,10 +19,53 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/regulatory-rules/rules/",
+              "raw": "{{base_url}}/api/regulatory-rules/rules/?page={{page}}&limit={{limit}}&sort={{sort}}",
               "host": ["{{base_url}}"],
-              "path": ["api", "regulatory-rules", "rules", ""]
-            }
+              "path": ["api", "regulatory-rules", "rules", ""],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "{{search}}",
+                  "description": "Search in rule name and description"
+                },
+                {
+                  "key": "year",
+                  "value": "{{year}}",
+                  "description": "Filter by census year"
+                },
+                {
+                  "key": "program",
+                  "value": "{{program}}",
+                  "description": "Filter by program (Paint, Pesticides, etc.)"
+                },
+                {
+                  "key": "category",
+                  "value": "{{category}}",
+                  "description": "Filter by category (HSP, etc.)"
+                },
+                {
+                  "key": "is_active",
+                  "value": "{{is_active}}",
+                  "description": "Filter by active status"
+                },
+                {
+                  "key": "sort",
+                  "value": "{{sort}}",
+                  "description": "Sort field (name, program, created_at, etc.)"
+                },
+                {
+                  "key": "page",
+                  "value": "{{page}}",
+                  "description": "Page number for pagination"
+                },
+                {
+                  "key": "limit",
+                  "value": "{{limit}}",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "List all regulatory rules with search, filters, sorting, and pagination"
           }
         },
         {
@@ -36,13 +80,14 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"name\": \"New Rule\",\n    \"description\": \"Description\",\n    \"year\": 2023,\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 1000,\n    \"max_population\": 5000,\n    \"site_per_population\": 10,\n    \"base_required_sites\": 5,\n    \"event_offset_percentage\": null,\n    \"reallocation_percentage\": null,\n    \"is_active\": true\n}"
+              "raw": "{\n    \"regulatory_rule\": 1,\n    \"census_year\": 1,\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 5000,\n    \"max_population\": 250000,\n    \"site_per_population\": 40000,\n    \"base_required_sites\": 1,\n    \"is_active\": true\n}"
             },
             "url": {
               "raw": "{{base_url}}/api/regulatory-rules/rules/",
               "host": ["{{base_url}}"],
               "path": ["api", "regulatory-rules", "rules", ""]
-            }
+            },
+            "description": "Create a new regulatory rule census data record"
           }
         },
         {
@@ -59,7 +104,8 @@
               "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
               "host": ["{{base_url}}"],
               "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
-            }
+            },
+            "description": "Get a specific regulatory rule by ID"
           }
         },
         {
@@ -74,13 +120,14 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n    \"name\": \"Updated Rule\",\n    \"description\": \"Updated Description\",\n    \"year\": 2023,\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 1000,\n    \"max_population\": 5000,\n    \"site_per_population\": 10,\n    \"base_required_sites\": 5,\n    \"event_offset_percentage\": null,\n    \"reallocation_percentage\": null,\n    \"is_active\": true\n}"
+              "raw": "{\n    \"program\": \"Paint\",\n    \"category\": \"HSP\",\n    \"rule_type\": \"Site Requirements\",\n    \"min_population\": 5000,\n    \"max_population\": 250000,\n    \"site_per_population\": 40000,\n    \"base_required_sites\": 1,\n    \"is_active\": true\n}"
             },
             "url": {
               "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
               "host": ["{{base_url}}"],
               "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
-            }
+            },
+            "description": "Update a regulatory rule"
           }
         },
         {
@@ -92,7 +139,652 @@
               "raw": "{{base_url}}/api/regulatory-rules/rules/{{rule_id}}/",
               "host": ["{{base_url}}"],
               "path": ["api", "regulatory-rules", "rules", "{{rule_id}}", ""]
-            }
+            },
+            "description": "Delete a regulatory rule"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Community Census Data",
+      "item": [
+        {
+          "name": "Get Community Census Data",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/community-census-data/?page={{page}}&limit={{limit}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "community-census-data", ""],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "{{search}}",
+                  "description": "Search by community name"
+                },
+                {
+                  "key": "year",
+                  "value": "{{year}}",
+                  "description": "Filter by census year"
+                },
+                {
+                  "key": "tier",
+                  "value": "{{tier}}",
+                  "description": "Filter by tier"
+                },
+                {
+                  "key": "region",
+                  "value": "{{region}}",
+                  "description": "Filter by region"
+                },
+                {
+                  "key": "zone",
+                  "value": "{{zone}}",
+                  "description": "Filter by zone"
+                },
+                {
+                  "key": "province",
+                  "value": "{{province}}",
+                  "description": "Filter by province"
+                },
+                {
+                  "key": "is_active",
+                  "value": "{{is_active}}",
+                  "description": "Filter by active status"
+                },
+                {
+                  "key": "min_population",
+                  "value": "{{min_population}}",
+                  "description": "Minimum population filter"
+                },
+                {
+                  "key": "max_population",
+                  "value": "{{max_population}}",
+                  "description": "Maximum population filter"
+                },
+                {
+                  "key": "sort",
+                  "value": "{{sort}}",
+                  "description": "Sort field"
+                },
+                {
+                  "key": "page",
+                  "value": "{{page}}",
+                  "description": "Page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "{{limit}}",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "List community census data with advanced filtering and pagination"
+          }
+        },
+        {
+          "name": "Create Community Census Data",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"community\": 1,\n    \"census_year\": 1,\n    \"population\": 50000,\n    \"tier\": \"Tier 1\",\n    \"region\": \"Region A\",\n    \"zone\": \"Zone 1\",\n    \"province\": \"Province X\",\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/community/community-census-data/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "community-census-data", ""]
+            },
+            "description": "Create new community census data"
+          }
+        },
+        {
+          "name": "Get Community Census Data by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/community-census-data/{{community_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "community-census-data", "{{community_id}}", ""]
+            },
+            "description": "Get specific community census data by ID"
+          }
+        },
+        {
+          "name": "Update Community Census Data",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"population\": 55000,\n    \"tier\": \"Tier 1\",\n    \"region\": \"Region A\",\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/community/community-census-data/{{community_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "community-census-data", "{{community_id}}", ""]
+            },
+            "description": "Update community census data"
+          }
+        },
+        {
+          "name": "Delete Community Census Data",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/community/community-census-data/{{community_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "community-census-data", "{{community_id}}", ""]
+            },
+            "description": "Delete community census data"
+          }
+        },
+        {
+          "name": "Get Communities (Nested)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/communities/?page={{page}}&limit={{limit}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "communities", ""],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "{{search}}"
+                },
+                {
+                  "key": "year",
+                  "value": "{{year}}"
+                },
+                {
+                  "key": "tier",
+                  "value": "{{tier}}"
+                },
+                {
+                  "key": "region",
+                  "value": "{{region}}"
+                },
+                {
+                  "key": "is_active",
+                  "value": "{{is_active}}"
+                },
+                {
+                  "key": "sort",
+                  "value": "{{sort}}"
+                },
+                {
+                  "key": "page",
+                  "value": "{{page}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "{{limit}}"
+                }
+              ]
+            },
+            "description": "Get communities with nested census data"
+          }
+        },
+        {
+          "name": "Get Community by ID (Nested)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/communities/{{community_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "communities", "{{community_id}}", ""]
+            },
+            "description": "Get specific community with nested census data"
+          }
+        },
+        {
+          "name": "Get Census Years",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/census-years/?page={{page}}&limit={{limit}}&sort={{sort}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "census-years", ""]
+            },
+            "description": "List all census years with associated data"
+          }
+        },
+        {
+          "name": "Create Census Year",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"year\": 2026,\n    \"description\": \"2026 Census Year\",\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/community/census-years/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "census-years", ""]
+            },
+            "description": "Create a new census year"
+          }
+        },
+        {
+          "name": "Get Census Year by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/community/census-years/{{census_year_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "community", "census-years", "{{census_year_id}}", ""]
+            },
+            "description": "Get specific census year"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sites",
+      "item": [
+        {
+          "name": "Get Sites",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sites/?page={{page}}&limit={{limit}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sites", ""],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "{{search}}",
+                  "description": "Search by site name or city"
+                },
+                {
+                  "key": "year",
+                  "value": "{{year}}",
+                  "description": "Filter by census year"
+                },
+                {
+                  "key": "site_type",
+                  "value": "{{site_type}}",
+                  "description": "Filter by site type"
+                },
+                {
+                  "key": "operator_type",
+                  "value": "{{operator_type}}",
+                  "description": "Filter by operator type"
+                },
+                {
+                  "key": "community",
+                  "value": "{{community_id}}",
+                  "description": "Filter by community ID"
+                },
+                {
+                  "key": "region",
+                  "value": "{{region}}",
+                  "description": "Filter by region"
+                },
+                {
+                  "key": "is_active",
+                  "value": "{{is_active}}",
+                  "description": "Filter by active status"
+                },
+                {
+                  "key": "sort",
+                  "value": "{{sort}}",
+                  "description": "Sort field"
+                },
+                {
+                  "key": "page",
+                  "value": "{{page}}",
+                  "description": "Page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "{{limit}}",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "List site census data with filtering and pagination"
+          }
+        },
+        {
+          "name": "Create Site",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"site\": 1,\n    \"census_year\": 1,\n    \"site_type\": \"Paint Shop\",\n    \"operator_type\": \"Private\",\n    \"community\": 1,\n    \"region\": \"Region A\",\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/sites/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sites", ""]
+            },
+            "description": "Create new site census data"
+          }
+        },
+        {
+          "name": "Get Site by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sites/{{site_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sites", "{{site_id}}", ""]
+            },
+            "description": "Get specific site by ID"
+          }
+        },
+        {
+          "name": "Update Site",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"site_type\": \"Paint Shop\",\n    \"operator_type\": \"Private\",\n    \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/sites/{{site_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sites", "{{site_id}}", ""]
+            },
+            "description": "Update site census data"
+          }
+        },
+        {
+          "name": "Delete Site",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/sites/{{site_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sites", "{{site_id}}", ""]
+            },
+            "description": "Delete site census data"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Compliance Calculations",
+      "item": [
+        {
+          "name": "Get Compliance Calculations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/compliance/?page_size={{page_size}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "compliance", ""],
+              "query": [
+                {
+                  "key": "program",
+                  "value": "{{program}}",
+                  "description": "Filter by program"
+                },
+                {
+                  "key": "community",
+                  "value": "{{community_id}}",
+                  "description": "Filter by community ID"
+                },
+                {
+                  "key": "census_year",
+                  "value": "{{census_year_id}}",
+                  "description": "Filter by census year ID"
+                },
+                {
+                  "key": "ordering",
+                  "value": "{{ordering}}",
+                  "description": "Sort order (e.g., -created_at)"
+                },
+                {
+                  "key": "page_size",
+                  "value": "{{page_size}}",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "List compliance calculations with filtering"
+          }
+        },
+        {
+          "name": "Trigger Compliance Calculation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"community\": {{community_id}},\n    \"program\": \"{{program}}\",\n    \"census_year\": {{census_year_id}}\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/compliance/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "compliance", ""]
+            },
+            "description": "Trigger compliance calculation for a community (async task)"
+          }
+        },
+        {
+          "name": "Get Compliance Calculation by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/compliance/{{compliance_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "compliance", "{{compliance_id}}", ""]
+            },
+            "description": "Get specific compliance calculation"
+          }
+        },
+        {
+          "name": "Delete Compliance Calculation",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/compliance/{{compliance_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "compliance", "{{compliance_id}}", ""]
+            },
+            "description": "Delete a compliance calculation"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Test Check",
+      "item": [
+        {
+          "name": "Get Test Communities",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/test-check/communities/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "test-check", "communities", ""]
+            },
+            "description": "Test endpoint for communities"
+          }
+        },
+        {
+          "name": "Get Test Census Years",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/test-check/census-years/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "test-check", "census-years", ""]
+            },
+            "description": "Test endpoint for census years"
+          }
+        },
+        {
+          "name": "Get Test Sites",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/test-check/sites/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "test-check", "sites", ""]
+            },
+            "description": "Test endpoint for sites"
+          }
+        }
+      ]
+    },
+    {
+      "name": "API Documentation",
+      "item": [
+        {
+          "name": "OpenAPI Schema",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/schema/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "schema", ""]
+            },
+            "description": "Get OpenAPI schema for API documentation"
+          }
+        },
+        {
+          "name": "Swagger UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/schema/swagger-ui/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "schema", "swagger-ui", ""]
+            },
+            "description": "Open Swagger UI for interactive API documentation"
+          }
+        },
+        {
+          "name": "ReDoc",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/schema/redoc/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "schema", "redoc", ""]
+            },
+            "description": "Open ReDoc for API documentation"
           }
         }
       ]
@@ -102,12 +794,146 @@
     {
       "key": "base_url",
       "value": "http://127.0.0.1:8000",
-      "type": "string"
+      "type": "string",
+      "description": "Base URL for the API"
     },
     {
       "key": "rule_id",
-      "value": "123e4567-e89b-12d3-a456-426614174000",
-      "type": "string"
+      "value": "1",
+      "type": "string",
+      "description": "Regulatory rule ID for testing"
+    },
+    {
+      "key": "community_id",
+      "value": "1",
+      "type": "string",
+      "description": "Community ID for testing"
+    },
+    {
+      "key": "census_year_id",
+      "value": "1",
+      "type": "string",
+      "description": "Census year ID for testing"
+    },
+    {
+      "key": "site_id",
+      "value": "1",
+      "type": "string",
+      "description": "Site ID for testing"
+    },
+    {
+      "key": "compliance_id",
+      "value": "1",
+      "type": "string",
+      "description": "Compliance calculation ID for testing"
+    },
+    {
+      "key": "search",
+      "value": "",
+      "type": "string",
+      "description": "Search query"
+    },
+    {
+      "key": "year",
+      "value": "2026",
+      "type": "string",
+      "description": "Census year"
+    },
+    {
+      "key": "program",
+      "value": "Paint",
+      "type": "string",
+      "description": "Program name"
+    },
+    {
+      "key": "category",
+      "value": "HSP",
+      "type": "string",
+      "description": "Category"
+    },
+    {
+      "key": "tier",
+      "value": "Tier 1",
+      "type": "string",
+      "description": "Tier"
+    },
+    {
+      "key": "region",
+      "value": "Region A",
+      "type": "string",
+      "description": "Region"
+    },
+    {
+      "key": "zone",
+      "value": "",
+      "type": "string",
+      "description": "Zone"
+    },
+    {
+      "key": "province",
+      "value": "",
+      "type": "string",
+      "description": "Province"
+    },
+    {
+      "key": "site_type",
+      "value": "Paint Shop",
+      "type": "string",
+      "description": "Site type"
+    },
+    {
+      "key": "operator_type",
+      "value": "Private",
+      "type": "string",
+      "description": "Operator type"
+    },
+    {
+      "key": "is_active",
+      "value": "true",
+      "type": "string",
+      "description": "Active status"
+    },
+    {
+      "key": "sort",
+      "value": "-created_at",
+      "type": "string",
+      "description": "Sort field"
+    },
+    {
+      "key": "ordering",
+      "value": "-created_at",
+      "type": "string",
+      "description": "Ordering for compliance"
+    },
+    {
+      "key": "page",
+      "value": "1",
+      "type": "string",
+      "description": "Page number"
+    },
+    {
+      "key": "limit",
+      "value": "10",
+      "type": "string",
+      "description": "Items per page"
+    },
+    {
+      "key": "page_size",
+      "value": "20",
+      "type": "string",
+      "description": "Page size for compliance"
+    },
+    {
+      "key": "min_population",
+      "value": "",
+      "type": "string",
+      "description": "Minimum population filter"
+    },
+    {
+      "key": "max_population",
+      "value": "",
+      "type": "string",
+      "description": "Maximum population filter"
     }
   ]
 }

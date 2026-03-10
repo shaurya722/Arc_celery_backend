@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 import uuid
 
@@ -214,3 +215,32 @@ class CommunityCensusData(models.Model):
         if self.end_date and self.end_date < timezone.now():
             self.is_active = False
         super().save(*args, **kwargs)
+
+
+class AdjacentCommunity(models.Model):
+    """
+    AdjacentCommunity - Represents adjacency relationships between communities
+    with site reallocation capabilities. Sites can be assigned from source to target.
+    """
+    from_community = models.ForeignKey(
+        Community,
+        related_name='adjacent_from',
+        on_delete=models.CASCADE,
+        help_text="Source community with excess sites"
+    )
+    to_communities = models.ManyToManyField(
+        Community,
+        related_name='adjacent_to',
+        help_text="Target communities with shortfall"
+    )
+
+    # Census year
+    census_year = models.ForeignKey(
+        CensusYear,
+        on_delete=models.CASCADE,
+        related_name='adjacent_reallocations',
+        help_text="Census year for this adjacency"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)

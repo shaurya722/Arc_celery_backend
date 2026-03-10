@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import F, Exists, OuterRef, Q
+from django.db.models import F, Exists, OuterRef, Q, Sum, Avg
 from .models import ComplianceCalculation
 from .serializers import ComplianceCalculationSerializer
 from .tasks import calculate_community_compliance
@@ -12,7 +12,7 @@ from .tasks import calculate_community_compliance
 
 class ComplianceCalculationPagination(PageNumberPagination):
     page_size = 20
-    page_size_query_param = 'page_size'
+    page_size_query_param = 'limit'
     max_page_size = 100
 
 
@@ -22,9 +22,9 @@ class ComplianceCalculationListCreate(APIView):
     """
     pagination_class = ComplianceCalculationPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['community', 'program', 'created_at']
-    search_fields = ['community__name', 'program']
-    ordering_fields = ['created_at', 'compliance_rate', 'shortfall']
+    filterset_fields = ['community', 'program', 'created_at', 'census_year', 'shortfall', 'excess', 'compliance_rate']
+    search_fields = ['community__name', 'program', 'census_year__year']
+    ordering_fields = ['created_at', 'compliance_rate', 'shortfall', 'excess', 'required_sites', 'actual_sites', 'community__name', 'census_year__year', 'program']
     
     def get(self, request):
         from community.models import CommunityCensusData
@@ -50,13 +50,38 @@ class ComplianceCalculationListCreate(APIView):
         program = request.query_params.get('program')
         community = request.query_params.get('community')
         census_year = request.query_params.get('census_year')
+        year = request.query_params.get('year')
+        status_filter = request.query_params.get('status')
+        search = request.query_params.get('search')
         
+        if search:
+            calculations = calculations.filter(
+                Q(community__name__icontains=search) |
+                Q(program__icontains=search) |
+                Q(census_year__year__icontains=search)
+            )
         if program:
             calculations = calculations.filter(program=program)
         if community:
             calculations = calculations.filter(community__id=community)
         if census_year:
             calculations = calculations.filter(census_year__id=census_year)
+        if year:
+            calculations = calculations.filter(census_year__year=year)
+        if status_filter:
+            if status_filter == 'compliant':
+                calculations = calculations.filter(shortfall=0, excess=0)
+            elif status_filter == 'shortfall':
+                calculations = calculations.filter(shortfall__gt=0)
+            elif status_filter == 'excess':
+                calculations = calculations.filter(excess__gt=0)
+        
+        # Compute summary aggregates
+        compliant_communities = calculations.filter(shortfall=0, excess=0).count()
+        total_shortfall = calculations.aggregate(total=Sum('shortfall'))['total'] or 0
+        total_excess = calculations.aggregate(total=Sum('excess'))['total'] or 0
+        overall_rate = calculations.aggregate(avg=Avg('compliance_rate'))['avg'] or 0
+        total_sites = calculations.aggregate(total=Sum('actual_sites'))['total'] or 0
         
         # Apply ordering
         ordering = request.query_params.get('ordering', '-created_at')
@@ -68,7 +93,15 @@ class ComplianceCalculationListCreate(APIView):
         
         if page is not None:
             serializer = ComplianceCalculationSerializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
+            response_data = paginator.get_paginated_response(serializer.data).data
+            response_data['summary'] = {
+                'compliant_communities': compliant_communities,
+                'shortfalls': total_shortfall,
+                'excesses': total_excess,
+                'overall_rate': round(overall_rate, 2) if overall_rate else 0,
+                'total_sites': total_sites
+            }
+            return Response(response_data)
         
         serializer = ComplianceCalculationSerializer(calculations, many=True)
         return Response(serializer.data)

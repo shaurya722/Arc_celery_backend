@@ -199,14 +199,81 @@ def count_actual_sites(community: Community, program: str, census_year: Optional
             return 0
     
     # Count active sites with the program enabled that are associated with this community in this census year
-    filter_kwargs = {
-        'community': community,
-        'census_year': census_year,
-        'is_active': True,
-        program_field: True
-    }
+    queryset = SiteCensusData.objects.filter(
+        community=community,
+        census_year=census_year,
+        is_active=True,
+        **{program_field: True}
+    )
     
-    return SiteCensusData.objects.filter(**filter_kwargs).count()
+    # For Event sites, also require approval
+    queryset = queryset.filter(
+        ~Q(site_type='Event') | Q(event_approved=True)
+    )
+    
+    return queryset.count()
+
+
+def calculate_required_events(
+    community: Community,
+    census_year: Optional[CensusYear] = None
+) -> int:
+    """
+    Calculate required events based on RegulatoryRuleCensusData with rule_type='Events'.
+    
+    Args:
+        community: Community instance
+        census_year: CensusYear instance (defaults to latest census year for community)
+    
+    Returns:
+        Number of required events
+    """
+    if census_year is None:
+        # Get the latest census year for this community
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return 0  # No census data for this community
+    
+    # Get community census data for this year
+    try:
+        community_census = CommunityCensusData.objects.get(
+            community=community,
+            census_year=census_year
+        )
+        population = community_census.population
+    except CommunityCensusData.DoesNotExist:
+        return 0
+    
+    # Query for active Events rules matching census year
+    rule_census_data = RegulatoryRuleCensusData.objects.filter(
+        census_year=census_year,
+        rule_type='Events',
+        is_active=True
+    ).filter(
+        Q(min_population__lte=population) | Q(min_population__isnull=True),
+        Q(max_population__gte=population) | Q(max_population__isnull=True)
+    ).select_related('regulatory_rule').order_by('min_population')
+    
+    for rule_data in rule_census_data:
+        # Check if population falls within rule's range
+        if rule_data.min_population is not None and population < rule_data.min_population:
+            continue
+        if rule_data.max_population is not None and population > rule_data.max_population:
+            continue
+        
+        # For events, perhaps use base_required_sites or calculate based on population
+        if rule_data.base_required_sites is not None:
+            required = rule_data.base_required_sites
+        elif rule_data.site_per_population is not None:
+            required = math.ceil(population / rule_data.site_per_population)
+        else:
+            continue
+        
+        return required
+    
+    return 0  # No rule found
 
 
 def calculate_compliance(

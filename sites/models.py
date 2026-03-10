@@ -89,6 +89,7 @@ class SiteCensusData(models.Model):
     
     # Year-specific status
     is_active = models.BooleanField(default=True, db_index=True)
+    event_approved = models.BooleanField(default=False, help_text="Whether this Event site has been approved by the user")
     site_start_date = models.DateTimeField(null=True, blank=True)
     site_end_date = models.DateTimeField(null=True, blank=True, db_index=True)
     
@@ -144,6 +145,10 @@ class SiteCensusData(models.Model):
         )
     
     def save(self, *args, **kwargs):
+        # For Event sites, is_active mirrors event_approved
+        if self.site_type == 'Event':
+            self.is_active = self.event_approved
+        
         # Nullify dates if program is disabled
         if not self.program_paint:
             self.program_paint_start_date = None

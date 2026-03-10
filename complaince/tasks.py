@@ -134,7 +134,7 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
                 logger.error(f"No census data found for community {community_id}")
                 return []
         
-        # Check if community is active in this census year
+        # Check if community is active in this census year (only skip if explicitly inactive)
         try:
             community_census = CommunityCensusData.objects.get(
                 community=community,
@@ -144,8 +144,8 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
                 logger.info(f"Community {community.name} is not active in year {census_year.year}. Skipping compliance calculation.")
                 return []
         except CommunityCensusData.DoesNotExist:
-            logger.warning(f"No census data found for community {community.name} in year {census_year.year}. Skipping compliance calculation.")
-            return []
+            # No explicit census data - proceed with calculation based on site data
+            logger.info(f"No explicit census data for community {community.name} in year {census_year.year}. Proceeding with site-based calculation.")
         
         programs = [program] if program else ['Paint', 'Lighting', 'Solvents', 'Pesticides']
         
@@ -189,8 +189,8 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
         return results
         
     except Community.DoesNotExist:
-        logger.error(f"Community with id {community_id} not found")
-        raise
+        logger.error(f"Community with id {community_id} not found - skipping compliance calculation")
+        return []  # Return empty list instead of raising exception
     except Exception as e:
         logger.error(f"Error calculating compliance for community {community_id}: {str(e)}")
         raise
