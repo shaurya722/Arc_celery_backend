@@ -54,7 +54,7 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
     class Meta:
         model = SiteCensusData
         fields = [
-            'id', 'site', 'site_name', 'census_year', 'census_year_value',
+            'id', 'site_name', 'census_year', 'census_year_value',
             'community', 'community_name', 'site_type', 'operator_type', 'service_partner',
             'address_line_1', 'address_line_2', 'address_city', 'address_postal_code',
             'region', 'service_area', 'address_latitude', 'address_longitude',
@@ -69,6 +69,48 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'site': {'required': False}
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # For POST/PUT requests, make site accept name/values instead of IDs
+        if self.context.get('request') and self.context['request'].method in ['POST', 'PUT', 'PATCH']:
+            # Change field types for input
+            self.fields['site'] = serializers.CharField(required=False, allow_blank=True)
+            self.fields['census_year'] = serializers.IntegerField()
+
+    def validate_site(self, value):
+        """Validate and lookup site by name, create if it doesn't exist (for create operations only)"""
+        if isinstance(value, str):
+            if self.instance:
+                # For updates, find the existing site linked to this census data and update its name
+                site = self.instance.site
+                site.site_name = value
+                site.save()
+                return site
+            else:
+                # For creates, get or create the site
+                site, created = Site.objects.get_or_create(
+                    site_name=value,
+                    defaults={'site_name': value}
+                )
+                return site
+        return value
+
+    def validate_census_year(self, value):
+        """Validate and lookup census year by year value"""
+        if isinstance(value, int):
+            try:
+                census_year = CensusYear.objects.get(year=value)
+                return census_year
+            except CensusYear.DoesNotExist:
+                raise serializers.ValidationError(f"Census year {value} not found.")
+        return value
+    
+    def create(self, validated_data):
+        """Override create to handle site_name field which is not part of the model"""
+        # Remove site_name from validated_data as it's not a model field
+        validated_data.pop('site_name', None)
+        return super().create(validated_data)
     
     def validate(self, data):
         """
@@ -77,15 +119,22 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
         """
         instance = self.instance
         
-        # Handle site_name - create or get site
+        # Handle site_name - create or get site and set it in data
         site_name = data.pop('site_name', None)
         if site_name and not data.get('site'):
-            # Create new site or get existing one by name
-            site, created = Site.objects.get_or_create(
-                site_name=site_name,
-                defaults={'site_name': site_name}
-            )
-            data['site'] = site
+            if instance:
+                # For updates, find the existing site linked to this census data and update its name
+                site = instance.site
+                site.site_name = site_name
+                site.save()
+                data['site'] = site
+            else:
+                # For creates, get or create the site
+                site, created = Site.objects.get_or_create(
+                    site_name=site_name,
+                    defaults={'site_name': site_name}
+                )
+                data['site'] = site
         
         # Get site and census_year from data (use existing values if not provided)
         site = data.get('site', instance.site if instance else None)

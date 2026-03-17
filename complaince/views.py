@@ -198,3 +198,54 @@ class ComplianceCalculationDetail(APIView):
         calculation.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+
+class ManualComplianceRecalculation(APIView):
+    """
+    API endpoint to manually trigger full compliance recalculation for all communities.
+    Recalculates compliance for all active communities, checking all regulatory rules and sites.
+    """
+    
+    def post(self, request):
+        """
+        Trigger manual compliance recalculation for all communities or a specific census year.
+        
+        Query Parameters:
+        - census_year (optional): Census year ID to recalculate. If not provided, uses latest census year.
+        """
+        from .tasks import calculate_all_compliance
+        from community.models import CensusYear
+        
+        census_year_id = request.data.get('census_year') or request.query_params.get('census_year')
+        
+        # Validate census year if provided
+        if census_year_id:
+            try:
+                census_year = CensusYear.objects.get(id=census_year_id)
+                census_year_value = census_year.year
+            except CensusYear.DoesNotExist:
+                return Response(
+                    {'error': f'Census year with ID {census_year_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            # Use latest census year
+            census_year = CensusYear.objects.order_by('-year').first()
+            if not census_year:
+                return Response(
+                    {'error': 'No census year found in the system'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            census_year_id = census_year.id
+            census_year_value = census_year.year
+        
+        # Trigger async calculation for all communities
+        task = calculate_all_compliance.delay(census_year_id)
+        
+        return Response({
+            'message': 'Full compliance recalculation triggered successfully',
+            'task_id': task.id,
+            'census_year': census_year_value,
+            'census_year_id': census_year_id,
+            'description': 'Recalculating compliance for all active communities with all regulatory rules and site data',
+            'status': 'processing'
+        }, status=status.HTTP_202_ACCEPTED)

@@ -252,6 +252,50 @@ class CommunityCensusDataDetail(APIView):
         return Response({"message": "Community census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
+class CommunityDropdown(APIView):
+    """Community dropdown API returning active communities for a census year"""
+
+    def get(self, request):
+        """List active communities filtered by census year"""
+        census_year_id = request.query_params.get('census_year')
+        year_value = request.query_params.get('year')
+
+        if not census_year_id and not year_value:
+            return Response(
+                {"error": "Provide either 'census_year' (ID) or 'year' (value) query parameter"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        queryset = CommunityCensusData.objects.filter(is_active=True)
+
+        if census_year_id:
+            try:
+                queryset = queryset.filter(census_year__id=int(census_year_id))
+            except (TypeError, ValueError):
+                return Response({"error": "census_year must be a valid integer ID"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if year_value:
+            try:
+                queryset = queryset.filter(census_year__year=int(year_value))
+            except (TypeError, ValueError):
+                return Response({"error": "year must be a valid integer"}, status=status.HTTP_400_BAD_REQUEST)
+
+        communities = queryset.values('community__id', 'community__name').distinct().order_by('community__name')
+
+        results = [
+            {
+                'id': str(item['community__id']),
+                'name': item['community__name'],
+            }
+            for item in communities
+        ]
+
+        return Response({
+            'communities': results,
+            'total': len(results)
+        })
+
+
 class YearDropdown(APIView):
     """
     API for Year dropdown with CRUD operations.
@@ -463,6 +507,432 @@ class AdjacentCommunityReallocationDetail(APIView):
 
         adjacency.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+import csv
+import io
+from datetime import datetime
+from rest_framework.parsers import MultiPartParser, FormParser
+
+
+class CommunityCensusDataImportExport(APIView):
+    """
+    API for importing and exporting CommunityCensusData via CSV.
+    
+    POST /community-census-data/import-export/ - Upload CSV file for import
+    GET /community-census-data/import-export/?census_year=2024 - Export CSV data
+    """
+    parser_classes = [MultiPartParser, FormParser]
+
+    # Expected CSV headers
+    CSV_HEADERS = [
+        'community_name', 'census_year', 'population', 'tier',
+        'region', 'zone', 'province', 'is_active',
+        'start_date', 'end_date'
+    ]
+
+    def get(self, request):
+        """Export CommunityCensusData to CSV"""
+        census_year_param = request.query_params.get('census_year')
+        
+        queryset = CommunityCensusData.objects.select_related(
+            'community', 'census_year'
+        ).all()
+        
+        if census_year_param:
+            queryset = queryset.filter(census_year__year=census_year_param)
+        
+        # Create CSV response
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow(self.CSV_HEADERS)
+        
+        # Write data rows
+        for data in queryset:
+            row = [
+                data.community.name,
+                data.census_year.year,
+                data.population,
+                data.tier,
+                data.region,
+                data.zone,
+                data.province,
+                data.is_active,
+                data.start_date.isoformat() if data.start_date else '',
+                data.end_date.isoformat() if data.end_date else '',
+            ]
+            writer.writerow(row)
+        
+        # Prepare response
+        output.seek(0)
+        response = Response(
+            output.getvalue(),
+            content_type='text/csv'
+        )
+        response['Content-Disposition'] = f'attachment; filename="community_census_data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        return response
+
+    def post(self, request):
+        """Import CommunityCensusData from CSV file"""
+        csv_file = request.FILES.get('file')
+        
+        if not csv_file:
+            return Response(
+                {'error': 'No file provided. Please upload a CSV file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not csv_file.name.endswith('.csv'):
+            return Response(
+                {'error': 'Invalid file format. Please upload a CSV file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            decoded_file = csv_file.read().decode('utf-8')
+            io_string = io.StringIO(decoded_file)
+            reader = csv.DictReader(io_string)
+        except Exception as e:
+            return Response(
+                {'error': f'Error reading CSV file: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate headers
+        if not reader.fieldnames:
+            return Response(
+                {'error': 'CSV file is empty or has no headers.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        missing_headers = set(self.CSV_HEADERS) - set(reader.fieldnames)
+        if missing_headers:
+            return Response(
+                {
+                    'error': f'Missing required headers: {", ".join(missing_headers)}',
+                    'expected_headers': self.CSV_HEADERS,
+                    'provided_headers': list(reader.fieldnames)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        errors = []
+        imported_count = 0
+        updated_count = 0
+        row_number = 1  # Start at 1 (header is row 0)
+        
+        for row in reader:
+            row_number += 1
+            row_errors = self._validate_row(row, row_number)
+            
+            if row_errors:
+                errors.extend(row_errors)
+                continue
+            
+            try:
+                result = self._import_row(row)
+                if result == 'created':
+                    imported_count += 1
+                elif result == 'updated':
+                    updated_count += 1
+            except Exception as e:
+                errors.append({
+                    'row': row_number,
+                    'community': row.get('community_name', 'Unknown'),
+                    'error': f'Import failed: {str(e)}'
+                })
+        
+        response_data = {
+            'success': len(errors) == 0,
+            'imported': imported_count,
+            'updated': updated_count,
+            'errors': errors,
+            'total_rows': row_number - 1
+        }
+        
+        if errors:
+            response_data['error_count'] = len(errors)
+            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    def _validate_row(self, row, row_number):
+        """Validate a single CSV row and return list of errors"""
+        errors = []
+        
+        # Required field validations
+        community_name = row.get('community_name', '').strip()
+        if not community_name:
+            errors.append({
+                'row': row_number,
+                'field': 'community_name',
+                'error': 'Community name is required'
+            })
+        
+        # Census year validation
+        census_year_str = row.get('census_year', '').strip()
+        if not census_year_str:
+            errors.append({
+                'row': row_number,
+                'field': 'census_year',
+                'error': 'Census year is required'
+            })
+        else:
+            try:
+                year = int(census_year_str)
+                if year < 1900 or year > 2100:
+                    errors.append({
+                        'row': row_number,
+                        'field': 'census_year',
+                        'error': f'Census year must be between 1900 and 2100, got {year}'
+                    })
+            except ValueError:
+                errors.append({
+                    'row': row_number,
+                    'field': 'census_year',
+                    'error': f'Invalid census year: "{census_year_str}". Must be a valid integer.'
+                })
+        
+        # Population validation
+        population_str = row.get('population', '').strip()
+        if not population_str:
+            errors.append({
+                'row': row_number,
+                'field': 'population',
+                'error': 'Population is required'
+            })
+        else:
+            try:
+                population = int(population_str)
+                if population < 0:
+                    errors.append({
+                        'row': row_number,
+                        'field': 'population',
+                        'error': f'Population must be a positive integer, got {population}'
+                    })
+            except ValueError:
+                errors.append({
+                    'row': row_number,
+                    'field': 'population',
+                    'error': f'Invalid population: "{population_str}". Must be a valid integer.'
+                })
+        
+        # Tier validation
+        tier = row.get('tier', '').strip()
+        if not tier:
+            errors.append({
+                'row': row_number,
+                'field': 'tier',
+                'error': 'Tier is required'
+            })
+        elif len(tier) > 50:
+            errors.append({
+                'row': row_number,
+                'field': 'tier',
+                'error': f'Tier must be 50 characters or less, got {len(tier)} characters'
+            })
+        
+        # Region validation
+        region = row.get('region', '').strip()
+        if not region:
+            errors.append({
+                'row': row_number,
+                'field': 'region',
+                'error': 'Region is required'
+            })
+        elif len(region) > 50:
+            errors.append({
+                'row': row_number,
+                'field': 'region',
+                'error': f'Region must be 50 characters or less, got {len(region)} characters'
+            })
+        
+        # Zone validation
+        zone = row.get('zone', '').strip()
+        if not zone:
+            errors.append({
+                'row': row_number,
+                'field': 'zone',
+                'error': 'Zone is required'
+            })
+        elif len(zone) > 50:
+            errors.append({
+                'row': row_number,
+                'field': 'zone',
+                'error': f'Zone must be 50 characters or less, got {len(zone)} characters'
+            })
+        
+        # Province validation
+        province = row.get('province', '').strip()
+        if not province:
+            errors.append({
+                'row': row_number,
+                'field': 'province',
+                'error': 'Province is required'
+            })
+        elif len(province) > 50:
+            errors.append({
+                'row': row_number,
+                'field': 'province',
+                'error': f'Province must be 50 characters or less, got {len(province)} characters'
+            })
+        
+        # Is active validation - optional field with default true
+        is_active_str = row.get('is_active', '').strip().lower()
+        if is_active_str and is_active_str not in ['true', 'false', '1', '0', 'yes', 'no']:
+            errors.append({
+                'row': row_number,
+                'field': 'is_active',
+                'error': f'Invalid is_active value: "{is_active_str}". Must be true/false, 1/0, or yes/no.'
+            })
+        
+        # Date validations
+        for date_field in ['start_date', 'end_date']:
+            date_str = row.get(date_field, '').strip()
+            if date_str:
+                try:
+                    datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except ValueError:
+                    errors.append({
+                        'row': row_number,
+                        'field': date_field,
+                        'error': f'Invalid date format: "{date_str}". Use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).'
+                    })
+        
+        # Check if census year exists
+        if census_year_str and not errors:
+            try:
+                year = int(census_year_str)
+                if not CensusYear.objects.filter(year=year).exists():
+                    errors.append({
+                        'row': row_number,
+                        'field': 'census_year',
+                        'error': f'Census year {year} does not exist in the system. Please create it first.'
+                    })
+            except ValueError:
+                pass  # Already handled above
+        
+        return errors
+    
+    def _import_row(self, row):
+        """Import a single validated row. Returns 'created', 'updated', or raises exception."""
+        community_name = row['community_name'].strip()
+        census_year = int(row['census_year'].strip())
+        population = int(row['population'].strip())
+        tier = row['tier'].strip()
+        region = row['region'].strip()
+        zone = row['zone'].strip()
+        province = row['province'].strip()
+        
+        # Parse is_active
+        is_active_str = row.get('is_active', 'true').strip().lower()
+        is_active = is_active_str in ['true', '1', 'yes', '']
+        
+        # Parse dates
+        start_date = None
+        end_date = None
+        
+        if row.get('start_date', '').strip():
+            start_date = datetime.fromisoformat(row['start_date'].strip().replace('Z', '+00:00'))
+        if row.get('end_date', '').strip():
+            end_date = datetime.fromisoformat(row['end_date'].strip().replace('Z', '+00:00'))
+        
+        # Get or create community
+        community, _ = Community.objects.get_or_create(name=community_name)
+        
+        # Get census year object
+        census_year_obj = CensusYear.objects.get(year=census_year)
+        
+        # Check if record exists
+        existing = CommunityCensusData.objects.filter(
+            community=community,
+            census_year=census_year_obj
+        ).first()
+        
+        if existing:
+            # Update existing record
+            existing.population = population
+            existing.tier = tier
+            existing.region = region
+            existing.zone = zone
+            existing.province = province
+            existing.is_active = is_active
+            existing.start_date = start_date
+            existing.end_date = end_date
+            existing.save()
+            return 'updated'
+        else:
+            # Create new record
+            CommunityCensusData.objects.create(
+                community=community,
+                census_year=census_year_obj,
+                population=population,
+                tier=tier,
+                region=region,
+                zone=zone,
+                province=province,
+                is_active=is_active,
+                start_date=start_date,
+                end_date=end_date
+            )
+            return 'created'
+
+
+class CommunityCensusDataImportTemplate(APIView):
+    """
+    API to download a CSV template for importing CommunityCensusData.
+    """
+    
+    def get(self, request):
+        """Download CSV template with sample data from file"""
+        try:
+            # Read from static/templates directory
+            import os
+            from django.conf import settings
+            
+            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'community_census_data_template.csv')
+            if os.path.exists(template_path):
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    csv_content = f.read()
+            else:
+                raise FileNotFoundError("Template file not found")
+                
+        except Exception as e:
+            # Fallback to hardcoded template if file not found
+            import csv
+            import io
+            
+            headers = [
+                'community_name', 'census_year', 'population', 'tier',
+                'region', 'zone', 'province', 'is_active',
+                'start_date', 'end_date'
+            ]
+            sample_data = [
+                ['Toronto', '2030', '2930000', 'Tier 1', 'Central', 'Zone A', 'Ontario', 'true', '2030-01-01T00:00:00', ''],
+                ['Vancouver', '2030', '675218', 'Tier 1', 'West', 'Zone B', 'British Columbia', 'true', '2030-01-01T00:00:00', ''],
+                ['Montreal', '2030', '1762949', 'Tier 1', 'East', 'Zone C', 'Quebec', 'true', '2030-01-01T00:00:00', ''],
+            ]
+            
+            output = io.StringIO()
+            writer = csv.writer(output, lineterminator='\n')  # Force Unix line endings
+            writer.writerow(headers)
+            writer.writerows(sample_data)
+            output.seek(0)
+            csv_content = output.getvalue()
+        
+        # Ensure proper encoding and line endings for CSV response
+        csv_content = csv_content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Use HttpResponse instead of DRF Response to avoid JSON escaping
+        from django.http import HttpResponse
+        response = HttpResponse(
+            csv_content,
+            content_type='text/csv; charset=utf-8'
+        )
+        response['Content-Disposition'] = 'attachment; filename="community_census_data_template.csv"'
+        return response
 
 
 class MapDataView(APIView):

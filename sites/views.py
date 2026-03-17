@@ -3,11 +3,16 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
+from django.http import HttpResponse
 from .models import Site, SiteCensusData
 from .serializers import SiteSerializer, SiteCensusDataSerializer
 from complaince.utils import calculate_required_events
 from community.models import Community, CensusYear
 import uuid
+import csv
+import io
+from datetime import datetime
+from django.utils import timezone
 
 
 class SitePagination(PageNumberPagination):
@@ -338,3 +343,455 @@ class EventListing(APIView):
         paginator = self.pagination_class
         paginated_result = paginator.paginate_queryset(result, request)
         return paginator.get_paginated_response(paginated_result)
+
+
+class SiteCensusDataImportExport(APIView):
+    """
+    API for importing and exporting SiteCensusData via CSV.
+    
+    POST: Import SiteCensusData from CSV file upload
+    GET: Export SiteCensusData to CSV (optional filter by census_year)
+    """
+    
+    # Expected CSV headers
+    CSV_HEADERS = [
+        'site_name', 'census_year', 'community_name', 'site_type', 'operator_type', 'service_partner',
+        'address_line_1', 'address_line_2', 'address_city', 'address_postal_code', 'region', 'service_area',
+        'address_latitude', 'address_longitude', 'latitude', 'longitude', 'is_active', 'event_approved',
+        'site_start_date', 'site_end_date', 'program_paint', 'program_paint_start_date', 'program_paint_end_date',
+        'program_lights', 'program_lights_start_date', 'program_lights_end_date', 'program_solvents',
+        'program_solvents_start_date', 'program_solvents_end_date', 'program_pesticides', 'program_pesticides_start_date',
+        'program_pesticides_end_date', 'program_fertilizers', 'program_fertilizers_start_date', 'program_fertilizers_end_date'
+    ]
+    
+    # Site type choices
+    SITE_TYPE_CHOICES = [
+        'Collection Site', 'Event', 'Municipal Depot', 'Seasonal Depot',
+        'Return to Retail', 'Private Depot'
+    ]
+    
+    # Operator type choices
+    OPERATOR_TYPE_CHOICES = [
+        'Retailer', 'Distributor', 'Municipal', 'First Nation/Indigenous',
+        'Private Depot', 'Product Care', 'Regional District',
+        'Regional Service Commission', 'Other'
+    ]
+    
+    def post(self, request):
+        """Import SiteCensusData from CSV file upload"""
+        csv_file = request.FILES.get('file')
+        
+        if not csv_file:
+            return Response(
+                {'error': 'No file provided. Please upload a CSV file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not csv_file.name.endswith('.csv'):
+            return Response(
+                {'error': 'Invalid file format. Please upload a CSV file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            csv_content = csv_file.read().decode('utf-8')
+            # Unescape newlines if they were escaped during file transfer
+            csv_content = csv_content.replace('\\n', '\n').replace('\\r', '\r')
+            # Normalize line endings
+            csv_content = csv_content.replace('\r\n', '\n').replace('\r', '\n')
+            reader = csv.DictReader(csv_content.splitlines())
+        except Exception as e:
+            return Response(
+                {'error': f'Error reading CSV file: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate headers
+        if not reader.fieldnames:
+            return Response(
+                {'error': 'CSV file is empty or has no headers.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check required headers
+        required_headers = [
+            'site_name', 'census_year', 'site_type', 'address_line_1',
+            'address_city', 'region'
+        ]
+        missing_headers = [h for h in required_headers if h not in reader.fieldnames]
+        if missing_headers:
+            return Response({
+                'error': f'Missing required headers: {", ".join(missing_headers)}',
+                'expected_headers': self.CSV_HEADERS,
+                'provided_headers': list(reader.fieldnames)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        errors = []
+        imported_count = 0
+        updated_count = 0
+        row_number = 0
+        
+        for row in reader:
+            row_number += 1
+            row_errors = self._validate_row(row, row_number)
+            
+            if row_errors:
+                errors.extend(row_errors)
+                continue
+            
+            try:
+                result = self._import_row(row)
+                if result == 'created':
+                    imported_count += 1
+                elif result == 'updated':
+                    updated_count += 1
+            except Exception as e:
+                errors.append({
+                    'row': row_number,
+                    'site': row.get('site_name', 'Unknown'),
+                    'error': f'Import failed: {str(e)}'
+                })
+        
+        response_data = {
+            'success': len(errors) == 0,
+            'imported': imported_count,
+            'updated': updated_count,
+            'errors': errors,
+            'total_rows': row_number
+        }
+        
+        if errors:
+            response_data['error_count'] = len(errors)
+            return Response(response_data, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+    
+    def get(self, request):
+        """Export SiteCensusData to CSV (optional filter by census_year)"""
+        census_year_filter = request.GET.get('census_year')
+        
+        queryset = SiteCensusData.objects.select_related('site', 'census_year', 'community').all()
+        
+        if census_year_filter:
+            try:
+                year = int(census_year_filter)
+                queryset = queryset.filter(census_year__year=year)
+            except ValueError:
+                return Response(
+                    {'error': f'Invalid census year: {census_year_filter}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Create CSV response
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write headers
+        writer.writerow(self.CSV_HEADERS)
+        
+        # Write data rows
+        for data in queryset:
+            row = [
+                data.site.site_name,
+                data.census_year.year,
+                data.community.name if data.community else '',
+                data.site_type,
+                data.operator_type or '',
+                data.service_partner or '',
+                data.address_line_1,
+                data.address_line_2 or '',
+                data.address_city,
+                data.address_postal_code or '',
+                data.region,
+                data.service_area or '',
+                data.address_latitude or '',
+                data.address_longitude or '',
+                data.latitude or '',
+                data.longitude or '',
+                'true' if data.is_active else 'false',
+                'true' if data.event_approved else 'false',
+                data.site_start_date.isoformat() if data.site_start_date else '',
+                data.site_end_date.isoformat() if data.site_end_date else '',
+                'true' if data.program_paint else 'false',
+                data.program_paint_start_date.isoformat() if data.program_paint_start_date else '',
+                data.program_paint_end_date.isoformat() if data.program_paint_end_date else '',
+                'true' if data.program_lights else 'false',
+                data.program_lights_start_date.isoformat() if data.program_lights_start_date else '',
+                data.program_lights_end_date.isoformat() if data.program_lights_end_date else '',
+                'true' if data.program_solvents else 'false',
+                data.program_solvents_start_date.isoformat() if data.program_solvents_start_date else '',
+                data.program_solvents_end_date.isoformat() if data.program_solvents_end_date else '',
+                'true' if data.program_pesticides else 'false',
+                data.program_pesticides_start_date.isoformat() if data.program_pesticides_start_date else '',
+                data.program_pesticides_end_date.isoformat() if data.program_pesticides_end_date else '',
+                'true' if data.program_fertilizers else 'false',
+                data.program_fertilizers_start_date.isoformat() if data.program_fertilizers_start_date else '',
+                data.program_fertilizers_end_date.isoformat() if data.program_fertilizers_end_date else ''
+            ]
+            writer.writerow(row)
+        
+        output.seek(0)
+        csv_content = output.getvalue()
+        
+        response = HttpResponse(
+            csv_content,
+            content_type='text/csv; charset=utf-8'
+        )
+        response['Content-Disposition'] = f'attachment; filename="site_census_data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        return response
+    
+    def _validate_row(self, row, row_number):
+        """Validate a single CSV row and return list of errors"""
+        errors = []
+        
+        # Required field validations
+        site_name = row.get('site_name', '').strip()
+        if not site_name:
+            errors.append({'row': row_number, 'field': 'site_name', 'error': 'Site name is required'})
+        
+        census_year_str = row.get('census_year', '').strip()
+        if not census_year_str:
+            errors.append({'row': row_number, 'field': 'census_year', 'error': 'Census year is required'})
+        else:
+            try:
+                year = int(census_year_str)
+                if year < 1900 or year > 2100:
+                    errors.append({'row': row_number, 'field': 'census_year', 'error': f'Census year must be between 1900 and 2100'})
+            except ValueError:
+                errors.append({'row': row_number, 'field': 'census_year', 'error': f'Invalid census year: {census_year_str}'})
+        
+        # Site type validation
+        site_type = row.get('site_type', '').strip()
+        if not site_type:
+            errors.append({'row': row_number, 'field': 'site_type', 'error': 'Site type is required'})
+        elif site_type not in self.SITE_TYPE_CHOICES:
+            errors.append({'row': row_number, 'field': 'site_type', 'error': f'Invalid site type: {site_type}. Must be one of: {", ".join(self.SITE_TYPE_CHOICES)}'})
+        
+        # Address validations
+        address_line_1 = row.get('address_line_1', '').strip()
+        if not address_line_1:
+            errors.append({'row': row_number, 'field': 'address_line_1', 'error': 'Address line 1 is required'})
+        
+        address_city = row.get('address_city', '').strip()
+        if not address_city:
+            errors.append({'row': row_number, 'field': 'address_city', 'error': 'Address city is required'})
+        
+        region = row.get('region', '').strip()
+        if not region:
+            errors.append({'row': row_number, 'field': 'region', 'error': 'Region is required'})
+        
+        # Operator type validation
+        operator_type = row.get('operator_type', '').strip()
+        if operator_type and operator_type not in self.OPERATOR_TYPE_CHOICES:
+            errors.append({'row': row_number, 'field': 'operator_type', 'error': f'Invalid operator type: {operator_type}'})
+        
+        # Coordinate validations
+        for coord_field in ['address_latitude', 'address_longitude', 'latitude', 'longitude']:
+            coord_str = row.get(coord_field, '').strip()
+            if coord_str:
+                try:
+                    coord = float(coord_str)
+                    if coord_field in ['latitude'] and (coord < -90 or coord > 90):
+                        errors.append({'row': row_number, 'field': coord_field, 'error': f'{coord_field} must be between -90 and 90'})
+                    if coord_field in ['longitude'] and (coord < -180 or coord > 180):
+                        errors.append({'row': row_number, 'field': coord_field, 'error': f'{coord_field} must be between -180 and 180'})
+                except ValueError:
+                    errors.append({'row': row_number, 'field': coord_field, 'error': f'Invalid {coord_field}: {coord_str}'})
+        
+        # Boolean field validations
+        bool_fields = ['is_active', 'event_approved', 'program_paint', 'program_lights', 'program_solvents', 'program_pesticides', 'program_fertilizers']
+        for field in bool_fields:
+            value = row.get(field, '').strip().lower()
+            if value and value not in ['true', 'false', '1', '0', 'yes', 'no', '']:
+                errors.append({'row': row_number, 'field': field, 'error': f'Invalid boolean value for {field}: {value}'})
+        
+        # Date validations
+        date_fields = [
+            'site_start_date', 'site_end_date', 'program_paint_start_date', 'program_paint_end_date',
+            'program_lights_start_date', 'program_lights_end_date', 'program_solvents_start_date',
+            'program_solvents_end_date', 'program_pesticides_start_date', 'program_pesticides_end_date',
+            'program_fertilizers_start_date', 'program_fertilizers_end_date'
+        ]
+        for date_field in date_fields:
+            date_str = row.get(date_field, '').strip()
+            if date_str:
+                try:
+                    datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except ValueError:
+                    errors.append({'row': row_number, 'field': date_field, 'error': f'Invalid date format: {date_str}'})
+        
+        # Check census year exists
+        if census_year_str and not errors:
+            try:
+                year = int(census_year_str)
+                if not CensusYear.objects.filter(year=year).exists():
+                    errors.append({'row': row_number, 'field': 'census_year', 'error': f'Census year {year} does not exist'})
+            except ValueError:
+                pass
+        
+        return errors
+    
+    def _import_row(self, row):
+        """Import a single validated row. Returns 'created', 'updated', or raises exception."""
+        site_name = row['site_name'].strip()
+        census_year = int(row['census_year'].strip())
+        
+        # Get or create site
+        site, _ = Site.objects.get_or_create(site_name=site_name)
+        
+        # Get census year
+        census_year_obj = CensusYear.objects.get(year=census_year)
+        
+        # Get or create community if provided
+        community = None
+        community_name = row.get('community_name', '').strip()
+        if community_name:
+            community, _ = Community.objects.get_or_create(name=community_name)
+        
+        # Parse boolean values
+        def parse_bool(value):
+            if not value:
+                return False
+            return value.strip().lower() in ['true', '1', 'yes']
+        
+        # Parse optional decimal values
+        def parse_decimal(value):
+            if not value or value.strip() == '':
+                return None
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        
+        # Parse optional datetime
+        def parse_datetime(value):
+            if not value or value.strip() == '':
+                return None
+            try:
+                # Parse ISO format and make timezone-aware
+                dt = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+                if dt.tzinfo is None:
+                    dt = timezone.make_aware(dt)
+                return dt
+            except ValueError:
+                return None
+        
+        # Check if record exists
+        existing = SiteCensusData.objects.filter(
+            site=site,
+            census_year=census_year_obj
+        ).first()
+        
+        data = {
+            'site': site,
+            'census_year': census_year_obj,
+            'community': community,
+            'site_type': row.get('site_type', '').strip(),
+            'operator_type': row.get('operator_type', '').strip() or None,
+            'service_partner': row.get('service_partner', '').strip() or None,
+            'address_line_1': row.get('address_line_1', '').strip(),
+            'address_line_2': row.get('address_line_2', '').strip() or None,
+            'address_city': row.get('address_city', '').strip(),
+            'address_postal_code': row.get('address_postal_code', '').strip() or None,
+            'region': row.get('region', '').strip(),
+            'service_area': row.get('service_area', '').strip() or None,
+            'address_latitude': parse_decimal(row.get('address_latitude', '')),
+            'address_longitude': parse_decimal(row.get('address_longitude', '')),
+            'latitude': parse_decimal(row.get('latitude', '')),
+            'longitude': parse_decimal(row.get('longitude', '')),
+            'is_active': parse_bool(row.get('is_active', 'true')),
+            'event_approved': parse_bool(row.get('event_approved', 'false')),
+            'site_start_date': parse_datetime(row.get('site_start_date', '')),
+            'site_end_date': parse_datetime(row.get('site_end_date', '')),
+            'program_paint': parse_bool(row.get('program_paint', '')),
+            'program_paint_start_date': parse_datetime(row.get('program_paint_start_date', '')),
+            'program_paint_end_date': parse_datetime(row.get('program_paint_end_date', '')),
+            'program_lights': parse_bool(row.get('program_lights', '')),
+            'program_lights_start_date': parse_datetime(row.get('program_lights_start_date', '')),
+            'program_lights_end_date': parse_datetime(row.get('program_lights_end_date', '')),
+            'program_solvents': parse_bool(row.get('program_solvents', '')),
+            'program_solvents_start_date': parse_datetime(row.get('program_solvents_start_date', '')),
+            'program_solvents_end_date': parse_datetime(row.get('program_solvents_end_date', '')),
+            'program_pesticides': parse_bool(row.get('program_pesticides', '')),
+            'program_pesticides_start_date': parse_datetime(row.get('program_pesticides_start_date', '')),
+            'program_pesticides_end_date': parse_datetime(row.get('program_pesticides_end_date', '')),
+            'program_fertilizers': parse_bool(row.get('program_fertilizers', '')),
+            'program_fertilizers_start_date': parse_datetime(row.get('program_fertilizers_start_date', '')),
+            'program_fertilizers_end_date': parse_datetime(row.get('program_fertilizers_end_date', ''))
+        }
+        
+        if existing:
+            # Update existing record
+            for key, value in data.items():
+                setattr(existing, key, value)
+            existing.save()
+            return 'updated'
+        else:
+            # Create new record
+            SiteCensusData.objects.create(**data)
+            return 'created'
+
+
+class SiteCensusDataImportTemplate(APIView):
+    """
+    API to download a CSV template for importing SiteCensusData.
+    """
+    
+    def get(self, request):
+        """Download CSV template with sample data from file"""
+        try:
+            import os
+            from django.conf import settings
+            
+            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'site_census_data_template.csv')
+            if os.path.exists(template_path):
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    csv_content = f.read()
+            else:
+                raise FileNotFoundError("Template file not found")
+                
+        except Exception:
+            # Fallback to hardcoded template
+            headers = [
+                'site_name', 'census_year', 'community_name', 'site_type', 'operator_type', 'service_partner',
+                'address_line_1', 'address_line_2', 'address_city', 'address_postal_code', 'region', 'service_area',
+                'address_latitude', 'address_longitude', 'latitude', 'longitude', 'is_active', 'event_approved',
+                'site_start_date', 'site_end_date', 'program_paint', 'program_paint_start_date', 'program_paint_end_date',
+                'program_lights', 'program_lights_start_date', 'program_lights_end_date', 'program_solvents',
+                'program_solvents_start_date', 'program_solvents_end_date', 'program_pesticides', 'program_pesticides_start_date',
+                'program_pesticides_end_date', 'program_fertilizers', 'program_fertilizers_start_date', 'program_fertilizers_end_date'
+            ]
+            sample_data = [
+                ['Sample Collection Site', '2030', 'Toronto', 'Collection Site', 'Retailer', 'Partner A',
+                 '123 Main St', '', 'Toronto', 'M5V 3A8', 'Central', 'Downtown',
+                 '43.6532', '-79.3832', '43.6532', '-79.3832', 'true', 'false',
+                 '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '2030-12-31T23:59:59',
+                 'true', '2030-01-01T00:00:00', '', 'false', '', '', 'false', '', '', 'false', '', ''],
+                ['Sample Event Site', '2030', 'Vancouver', 'Event', 'Municipal', '',
+                 '456 Event Ave', 'Suite 100', 'Vancouver', 'V6B 1A1', 'West', 'Metro',
+                 '49.2827', '-123.1207', '49.2827', '-123.1207', 'true', 'true',
+                 '2030-06-01T00:00:00', '2030-06-30T23:59:59', 'true', '2030-06-01T00:00:00', '2030-06-30T23:59:59',
+                 'false', '', '', 'true', '2030-06-01T00:00:00', '2030-06-30T23:59:59', 'false', '', '', 'false', '', ''],
+                ['Sample Depot', '2030', 'Montreal', 'Municipal Depot', 'Municipal', 'City Services',
+                 '789 Depot Rd', '', 'Montreal', 'H3A 0G4', 'East', 'City Center',
+                 '45.5017', '-73.5673', '45.5017', '-73.5673', 'true', 'false',
+                 '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '',
+                 'true', '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '']
+            ]
+            
+            output = io.StringIO()
+            writer = csv.writer(output, lineterminator='\n')
+            writer.writerow(headers)
+            writer.writerows(sample_data)
+            output.seek(0)
+            csv_content = output.getvalue()
+        
+        # Ensure proper encoding and line endings
+        csv_content = csv_content.replace('\r\n', '\n').replace('\r', '\n')
+        
+        response = HttpResponse(
+            csv_content,
+            content_type='text/csv; charset=utf-8'
+        )
+        response['Content-Disposition'] = 'attachment; filename="site_census_data_template.csv"'
+        return response

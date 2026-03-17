@@ -11,7 +11,6 @@ class RegulatoryRule(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
-    description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -70,8 +69,9 @@ class RegulatoryRuleCensusData(models.Model):
     # Site Calculation
     min_population = models.IntegerField(null=True, blank=True)
     max_population = models.IntegerField(null=True, blank=True)
-    site_per_population = models.IntegerField(null=True, blank=True)
+    site_per_population = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
     base_required_sites = models.IntegerField(null=True, blank=True)
+    description = models.TextField(null=True, blank=True)
     
     # Events
     event_offset_percentage = models.IntegerField(null=True, blank=True)

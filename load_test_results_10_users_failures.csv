@@ -1,2 +1,0 @@
-Method,Name,Error,Occurrences
-GET,/dashboard,CatchResponseError('❌ Flower dashboard not accessible'),11

@@ -225,10 +225,18 @@ class CommunityCensusDataSerializer(serializers.ModelSerializer):
             self.fields['census_year'] = serializers.IntegerField()
 
     def validate_community(self, value):
-        """Validate and lookup community by name, create if it doesn't exist"""
+        """Validate and lookup community by name, create if it doesn't exist (for create operations only)"""
         if isinstance(value, str):
-            community, created = Community.objects.get_or_create(name=value)
-            return community
+            if self.instance:
+                # For updates, find the existing community linked to this census data and update its name
+                community = self.instance.community
+                community.name = value
+                community.save()
+                return community
+            else:
+                # For creates, get or create the community
+                community, created = Community.objects.get_or_create(name=value)
+                return community
         return value
 
     def validate_census_year(self, value):

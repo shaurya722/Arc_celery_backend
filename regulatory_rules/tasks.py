@@ -27,7 +27,7 @@ def check_expiry(self):
                 is_active=True
             ).select_related('regulatory_rule', 'census_year')
             rule_census_ids = list(expired_rule_census.values_list(
-                'id', 'regulatory_rule__name', 'census_year__year'
+                'id', 'regulatory_rule__name', 'census_year__id'
             ))
             rule_census_count = expired_rule_census.update(is_active=False)
             
@@ -37,7 +37,7 @@ def check_expiry(self):
                 is_active=True
             ).select_related('community', 'census_year')
             community_census_ids = list(expired_community_census.values_list(
-                'id', 'community__name', 'census_year__year'
+                'id', 'community__name', 'census_year__id'
             ))
             community_census_count = expired_community_census.update(is_active=False)
             
@@ -47,7 +47,7 @@ def check_expiry(self):
                 is_active=True
             ).select_related('site', 'community', 'census_year')
             site_census_ids = list(expired_site_census.values_list(
-                'id', 'site__site_name', 'census_year__year'
+                'id', 'site__site_name', 'census_year__id'
             ))
             site_census_count = expired_site_census.update(is_active=False)
         

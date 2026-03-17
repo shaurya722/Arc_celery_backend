@@ -114,7 +114,7 @@ class RegulatoryRuleListCreate(APIView):
 
     def post(self, request):
         # Deserialize the incoming JSON data
-        serializer = RegulatoryRuleCensusDataSerializer(data=request.data)
+        serializer = RegulatoryRuleCensusDataSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             # Save the new rule census data to the database
             serializer.save()
@@ -143,7 +143,7 @@ class RegulatoryRuleDetail(APIView):
         # Retrieve the rule census data by primary key
         rule = get_object_or_404(RegulatoryRuleCensusData, pk=pk)
         # Deserialize and validate the update data
-        serializer = RegulatoryRuleCensusDataSerializer(rule, data=request.data)
+        serializer = RegulatoryRuleCensusDataSerializer(rule, data=request.data, context={'request': request})
         if serializer.is_valid():
             # Save the updated rule census data
             serializer.save()
