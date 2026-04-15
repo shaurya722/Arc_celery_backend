@@ -193,15 +193,14 @@ LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'handlers': {
-        'file': {
+        'console': {
             'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': 'celery_logs.log',
+            'class': 'logging.StreamHandler',
         },
     },
     'loggers': {
         'regulatory_rules.tasks': {
-            'handlers': ['file'],
+            'handlers': ['console'],
             'level': 'INFO',
         },
     },
