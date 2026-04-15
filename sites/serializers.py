@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import Site, SiteCensusData
+from .models import Site, SiteCensusData, SiteReallocation
+from community.models import CensusYear, AdjacentCommunity, Community
 
 
 class SiteSerializer(serializers.ModelSerializer):
@@ -64,6 +65,9 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
             'program_solvents', 'program_solvents_start_date', 'program_solvents_end_date',
             'program_pesticides', 'program_pesticides_start_date', 'program_pesticides_end_date',
             'program_fertilizers', 'program_fertilizers_start_date', 'program_fertilizers_end_date',
+            'material_paint', 'material_light_bulbs', 'material_batteries', 'material_oil_filters',
+            'material_tires', 'material_electronics', 'material_household_hazardous_waste',
+            'sector_residential', 'sector_commercial', 'sector_industrial', 'sector_institutional',
             'created_at', 'updated_at'
         ]
         extra_kwargs = {
@@ -165,3 +169,65 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
         representation = super().to_representation(instance)
         representation['site_name'] = instance.site.site_name
         return representation
+
+
+class SiteReallocationSerializer(serializers.ModelSerializer):
+    """Serializer for site reallocation records"""
+    site_name = serializers.CharField(source='site_census_data.site.site_name', read_only=True)
+    from_community_name = serializers.CharField(source='from_community.name', read_only=True)
+    to_community_name = serializers.CharField(source='to_community.name', read_only=True)
+    census_year_value = serializers.IntegerField(source='census_year.year', read_only=True)
+    created_by_username = serializers.CharField(source='created_by.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = SiteReallocation
+        fields = [
+            'id', 'site_census_data', 'site_name',
+            'from_community', 'from_community_name',
+            'to_community', 'to_community_name',
+            'census_year', 'census_year_value',
+            'reallocated_at', 'created_by', 'created_by_username', 'reason'
+        ]
+        read_only_fields = ['id', 'reallocated_at', 'from_community', 'census_year']
+
+
+class ReallocateSiteSerializer(serializers.Serializer):
+    """Serializer for site reallocation API request"""
+    site_census_id = serializers.PrimaryKeyRelatedField(
+        queryset=SiteCensusData.objects.select_related('site', 'community', 'census_year'),
+        source='site_census_data'
+    )
+    to_community_id = serializers.PrimaryKeyRelatedField(
+        queryset=Community.objects.all(),
+        source='to_community'
+    )
+    program = serializers.ChoiceField(
+        choices=['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers'],
+        required=False,
+        allow_null=True,
+        help_text='Program for cap/shortfall/excess checks; inferred from site flags if omitted.',
+    )
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class AdjacentCommunitySerializer(serializers.ModelSerializer):
+    """Serializer for adjacent community relationships"""
+    from_community_name = serializers.CharField(source='from_community.name', read_only=True)
+    to_communities_data = serializers.SerializerMethodField()
+    census_year_value = serializers.IntegerField(source='census_year.year', read_only=True)
+    
+    class Meta:
+        model = AdjacentCommunity
+        fields = [
+            'id', 'from_community', 'from_community_name',
+            'to_communities', 'to_communities_data',
+            'census_year', 'census_year_value',
+            'created_at', 'updated_at'
+        ]
+    
+    def get_to_communities_data(self, obj):
+        """Return list of adjacent communities with their details"""
+        return [
+            {'id': str(comm.id), 'name': comm.name}
+            for comm in obj.to_communities.all()
+        ]

@@ -9,6 +9,8 @@ class CensusYear(models.Model):
     Census Year - represents a specific year for data collection.
     """
     year = models.PositiveIntegerField(unique=True)
+    start_date = models.DateTimeField(default=timezone.now)
+    end_date = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -22,8 +24,16 @@ class CensusYear(models.Model):
         """
         Auto-create census data records for all active communities and sites
         when a new census year is created.
+        Also sets the end_date of the previous census year.
         """
         is_new = self.pk is None
+        if is_new:
+            # Set end_date of previous census year to this census year's start_date
+            previous_year = CensusYear.objects.filter(year__lt=self.year).order_by('-year').first()
+            if previous_year and not previous_year.end_date:
+                previous_year.end_date = self.start_date
+                previous_year.save(update_fields=['end_date'])
+        
         super().save(*args, **kwargs)
         
         if is_new:
@@ -149,9 +159,24 @@ class Community(models.Model):
     Community - Static identity only.
     Stores only the community name and identity.
     All year-specific data is stored in CommunityCensusData.
+    Optional boundary (PostGIS) powers map draw + spatial adjacency.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, unique=True)
+    boundary = models.JSONField(
+        null=True,
+        blank=True,
+        help_text='GeoJSON geometry (Polygon, lon/lat). Used for map adjacency queries.',
+    )
+    adjacent = models.ManyToManyField(
+        'self',
+        symmetrical=True,
+        blank=True,
+        help_text=(
+            'Bidirectional map neighbors: touch, overlap, boundary/geometry intersect, '
+            'or within a small gap (see community.spatial_sql).'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -6,6 +6,9 @@ from django.db.models import Q
 from uuid import UUID
 from .models import Community, CommunityCensusData, CensusYear, AdjacentCommunity
 from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer, CensusYearWithDataSerializer, AdjacentCommunitySerializer, AdjacentCommunityReallocationSerializer, MapDataSerializer
+from .geo_utils import extract_geojson_geometry, normalize_polygon_geojson
+from .spatial_sql import community_ids_touching_polygon
+from .map_serializers import CommunityMapListSerializer
 from complaince.tasks import calculate_community_compliance
 
 
@@ -295,16 +298,33 @@ class CommunityDropdown(APIView):
             'total': len(results)
         })
 
+class YearData(APIView):
+    """
+    API for Year data with pagination.
+    Returns paginated year list.
+    """
+    pagination_class = CommunityPagination()
+
+    def get(self, request):
+        """Get years for dropdown with DRF pagination"""
+        queryset = CensusYear.objects.order_by('-year')
+        paginator = self.pagination_class
+        paginated_queryset = paginator.paginate_queryset(queryset, request)
+        years = list(paginated_queryset.values('id', 'year', 'start_date', 'end_date')) if hasattr(paginated_queryset, 'values') else [
+            {'id': y.id, 'year': y.year, 'start_date': y.start_date, 'end_date': y.end_date} for y in paginated_queryset
+        ]
+        return paginator.get_paginated_response(years)
 
 class YearDropdown(APIView):
     """
     API for Year dropdown with CRUD operations.
     Returns simple year list for dropdowns and supports full CRUD.
     """
+    pagination_class = CommunityPagination()
 
     def get(self, request):
         """Get all years for dropdown"""
-        years = CensusYear.objects.values('id', 'year').order_by('-year')
+        years = CensusYear.objects.values('id', 'year', 'start_date', 'end_date').order_by('-year')
         return Response({
             'years': list(years),
             'total': len(years)
@@ -318,6 +338,8 @@ class YearDropdown(APIView):
             return Response({
                 'id': census_year.id,
                 'year': census_year.year,
+                'start_date': census_year.start_date,
+                'end_date': census_year.end_date,
                 'message': f'Year {census_year.year} created successfully'
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -335,6 +357,8 @@ class YearDropdown(APIView):
             return Response({
                 'id': census_year.id,
                 'year': census_year.year,
+                'start_date': census_year.start_date,
+                'end_date': census_year.end_date,
                 'message': f'Year {census_year.year} updated successfully'
             })
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -942,3 +966,281 @@ class MapDataView(APIView):
         """Get map data (sites and municipalities) for the React component"""
         serializer = MapDataSerializer({}, context={'request': request})
         return Response(serializer.data)
+
+
+class MapFilterOptionsView(APIView):
+    """API view to get all available filter options for map data"""
+
+    def get(self, request):
+        """Get all available filter options"""
+        from sites.models import SiteCensusData
+
+        # Get census year from query params or use latest
+        year = request.query_params.get('year')
+        if year:
+            try:
+                from community.models import CensusYear
+                census_year = CensusYear.objects.get(year=year)
+            except CensusYear.DoesNotExist:
+                return Response({"error": "Census year not found"}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            from community.models import CensusYear
+            census_year = CensusYear.objects.order_by('-year').first()
+            if not census_year:
+                return Response({"error": "No census year found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get distinct values for filters
+        sites_queryset = SiteCensusData.objects.filter(census_year=census_year)
+
+        # Get unique operator types
+        operator_types = sites_queryset.exclude(operator_type__isnull=True).exclude(operator_type='').values_list('operator_type', flat=True).distinct().order_by('operator_type')
+
+        # Get unique site types
+        site_types = sites_queryset.exclude(site_type__isnull=True).exclude(site_type='').values_list('site_type', flat=True).distinct().order_by('site_type')
+
+        # Get unique community names
+        community_names = sites_queryset.exclude(community__isnull=True).values_list('community__name', flat=True).distinct().order_by('community__name')
+
+        # Get unique site names (for search suggestions)
+        site_names = sites_queryset.values_list('site__site_name', flat=True).distinct().order_by('site__site_name')[:100]  # Limit to 100 for performance
+
+        # Get programs (from model choices)
+        programs = ['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers']
+
+        # Get status options
+        status_options = ['Active', 'Inactive']
+
+        return Response({
+            'operator_types': list(operator_types),
+            'site_types': list(site_types),
+            'communities': list(community_names),
+            'site_names': list(site_names),
+            'programs': programs,
+            'status': status_options,
+            'census_year': {
+                'id': census_year.id,
+                'year': census_year.year,
+            }
+        })
+
+
+def _save_community_map_boundary(community, geom_dict):
+    """Persist polygon, recompute map adjacency (touch/overlap/intersect/near), sync symmetrical M2M."""
+    neighbor_ids = community_ids_touching_polygon(geom_dict, exclude_id=community.pk)
+    community.boundary = geom_dict
+    community.save(update_fields=['boundary', 'updated_at'])
+    neighbors = Community.objects.filter(pk__in=neighbor_ids)
+    community.adjacent.set(neighbors)
+    return neighbor_ids
+
+
+class CommunityMapAvailableForAssignment(APIView):
+    """
+    Communities that already exist in the DB — use `id` as `community_id` when POSTing a drawn boundary.
+
+    Query: ?search=foo&limit=500 (limit capped at 2000).
+    """
+
+    def get(self, request):
+        qs = Community.objects.order_by('name').only('id', 'name', 'boundary')
+        search = request.query_params.get('search')
+        if search and str(search).strip():
+            qs = qs.filter(name__icontains=str(search).strip())
+
+        try:
+            limit = int(request.query_params.get('limit', 500))
+        except (TypeError, ValueError):
+            limit = 500
+        limit = max(1, min(limit, 2000))
+
+        total = qs.count()
+        communities = [
+            {
+                'id': str(c.id),
+                'name': c.name,
+                'has_boundary': c.boundary is not None,
+            }
+            for c in qs[:limit]
+        ]
+
+        return Response(
+            {
+                'communities': communities,
+                'total': total,
+                'returned': len(communities),
+            }
+        )
+
+
+class CommunityMapBoundaryListCreate(APIView):
+    """
+    Leaflet / map flow: list communities with boundaries, or POST GeoJSON.
+
+    Use GET …/map-communities/available/ to list DB communities; copy `id` into POST `community_id`.
+
+    POST body (choose one):
+    - community_id + boundary — set boundary on an existing community (map draw → that row).
+    - name + boundary — create a new community (legacy / onboarding).
+    """
+
+    def get(self, request):
+        qs = (
+            Community.objects.filter(boundary__isnull=False)
+            .prefetch_related('adjacent')
+            .order_by('name')
+        )
+        return Response(CommunityMapListSerializer(qs, many=True).data)
+
+    def post(self, request):
+        community_id = request.data.get('community_id')
+        name = request.data.get('name')
+        boundary = request.data.get('boundary')
+
+        if boundary is None:
+            return Response(
+                {'error': 'boundary is required (GeoJSON Polygon, Feature, or FeatureCollection)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            geom_dict = extract_geojson_geometry(boundary)
+            geom_dict = normalize_polygon_geojson(geom_dict)
+        except ValueError as e:
+            return Response(
+                {'error': 'Invalid geometry', 'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if community_id is not None and str(community_id).strip() != '':
+            try:
+                pk = UUID(str(community_id).strip())
+            except ValueError:
+                return Response(
+                    {'error': 'community_id must be a valid UUID'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                community = Community.objects.get(pk=pk)
+            except Community.DoesNotExist:
+                return Response(
+                    {'error': 'Community not found'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            neighbor_ids = _save_community_map_boundary(community, geom_dict)
+
+            return Response(
+                {
+                    'id': str(community.id),
+                    'name': community.name,
+                    'adjacent_ids': list(neighbor_ids),
+                    'boundary': community.boundary,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if not name or not str(name).strip():
+            return Response(
+                {
+                    'error': 'Provide community_id (existing community) or name (create new).',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        clean_name = str(name).strip()
+        if Community.objects.filter(name__iexact=clean_name).exists():
+            return Response(
+                {'error': 'A community with this name already exists'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        neighbor_ids = community_ids_touching_polygon(geom_dict)
+        community = Community.objects.create(name=clean_name, boundary=geom_dict)
+        neighbors = Community.objects.filter(pk__in=neighbor_ids)
+        community.adjacent.set(neighbors)
+
+        return Response(
+            {
+                'id': str(community.id),
+                'name': community.name,
+                'adjacent_ids': list(neighbor_ids),
+                'boundary': community.boundary,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class CommunityMapBoundaryDetail(APIView):
+    """
+    Single community map geometry by UUID in the URL.
+
+    GET    — id, name, boundary, adjacent_ids (boundary may be null).
+    PUT/PATCH — body: { boundary } (GeoJSON); same response as POST update.
+    DELETE — remove boundary from map, clear adjacency links (community row kept).
+    """
+
+    def get_object(self, pk):
+        try:
+            return Community.objects.prefetch_related('adjacent').get(pk=pk)
+        except Community.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        community = self.get_object(pk)
+        if not community:
+            return Response(
+                {'error': 'Community not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(CommunityMapListSerializer(community).data)
+
+    def put(self, request, pk):
+        return self._update(request, pk)
+
+    def patch(self, request, pk):
+        return self._update(request, pk)
+
+    def _update(self, request, pk):
+        community = self.get_object(pk)
+        if not community:
+            return Response(
+                {'error': 'Community not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        boundary = request.data.get('boundary')
+        if boundary is None:
+            return Response(
+                {'error': 'boundary is required (GeoJSON Polygon, Feature, or FeatureCollection)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            geom_dict = extract_geojson_geometry(boundary)
+            geom_dict = normalize_polygon_geojson(geom_dict)
+        except ValueError as e:
+            return Response(
+                {'error': 'Invalid geometry', 'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        neighbor_ids = _save_community_map_boundary(community, geom_dict)
+        return Response(
+            {
+                'id': str(community.id),
+                'name': community.name,
+                'adjacent_ids': list(neighbor_ids),
+                'boundary': community.boundary,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        community = self.get_object(pk)
+        if not community:
+            return Response(
+                {'error': 'Community not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        community.adjacent.clear()
+        community.boundary = None
+        community.save(update_fields=['boundary', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)

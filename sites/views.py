@@ -4,14 +4,20 @@ from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
 from django.http import HttpResponse
-from .models import Site, SiteCensusData
-from .serializers import SiteSerializer, SiteCensusDataSerializer
+from django.core.exceptions import ValidationError
+from .models import Site, SiteCensusData, SiteReallocation
+from .serializers import (
+    SiteSerializer, SiteCensusDataSerializer, SiteReallocationSerializer,
+    ReallocateSiteSerializer, AdjacentCommunitySerializer
+)
+from community.models import Community, CensusYear, AdjacentCommunity
+from .services import SiteReallocationService
 from complaince.utils import calculate_required_events
-from community.models import Community, CensusYear
 import uuid
 import csv
 import io
 from datetime import datetime
+from uuid import UUID
 from django.utils import timezone
 
 
@@ -67,6 +73,63 @@ class SiteListCreate(APIView):
             is_active_bool = is_active.lower() in ['true', '1', 'yes']
             queryset = queryset.filter(is_active=is_active_bool)
 
+        # Material services filters
+        material_paint = request.query_params.get('material_paint', None)
+        if material_paint:
+            material_paint_bool = material_paint.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_paint=material_paint_bool)
+
+        material_light_bulbs = request.query_params.get('material_light_bulbs', None)
+        if material_light_bulbs:
+            material_light_bulbs_bool = material_light_bulbs.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_light_bulbs=material_light_bulbs_bool)
+
+        material_batteries = request.query_params.get('material_batteries', None)
+        if material_batteries:
+            material_batteries_bool = material_batteries.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_batteries=material_batteries_bool)
+
+        material_oil_filters = request.query_params.get('material_oil_filters', None)
+        if material_oil_filters:
+            material_oil_filters_bool = material_oil_filters.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_oil_filters=material_oil_filters_bool)
+
+        material_tires = request.query_params.get('material_tires', None)
+        if material_tires:
+            material_tires_bool = material_tires.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_tires=material_tires_bool)
+
+        material_electronics = request.query_params.get('material_electronics', None)
+        if material_electronics:
+            material_electronics_bool = material_electronics.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_electronics=material_electronics_bool)
+
+        material_household_hazardous_waste = request.query_params.get('material_household_hazardous_waste', None)
+        if material_household_hazardous_waste:
+            material_household_hazardous_waste_bool = material_household_hazardous_waste.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(material_household_hazardous_waste=material_household_hazardous_waste_bool)
+
+        # Collection sectors filters
+        sector_residential = request.query_params.get('sector_residential', None)
+        if sector_residential:
+            sector_residential_bool = sector_residential.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(sector_residential=sector_residential_bool)
+
+        sector_commercial = request.query_params.get('sector_commercial', None)
+        if sector_commercial:
+            sector_commercial_bool = sector_commercial.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(sector_commercial=sector_commercial_bool)
+
+        sector_industrial = request.query_params.get('sector_industrial', None)
+        if sector_industrial:
+            sector_industrial_bool = sector_industrial.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(sector_industrial=sector_industrial_bool)
+
+        sector_institutional = request.query_params.get('sector_institutional', None)
+        if sector_institutional:
+            sector_institutional_bool = sector_institutional.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(sector_institutional=sector_institutional_bool)
+
         # Sort
         sort = request.query_params.get('sort', 'site__site_name')
         queryset = queryset.order_by(sort)
@@ -75,7 +138,16 @@ class SiteListCreate(APIView):
         paginator = self.pagination_class
         paginated_queryset = paginator.paginate_queryset(queryset, request)
         serializer = SiteCensusDataSerializer(paginated_queryset, many=True)
-        return paginator.get_paginated_response(serializer.data)
+        response = paginator.get_paginated_response(serializer.data)
+        
+        # Add site counts to response
+        response.data['counts'] = {
+            'total_sites': queryset.count(),
+            'active_sites': queryset.filter(is_active=True).count(),
+            'inactive_sites': queryset.filter(is_active=False).count()
+        }
+        
+        return response
 
     def post(self, request):
         # Create new site census data record
@@ -795,3 +867,462 @@ class SiteCensusDataImportTemplate(APIView):
         )
         response['Content-Disposition'] = 'attachment; filename="site_census_data_template.csv"'
         return response
+
+
+class ReallocateSiteAPIView(APIView):
+    """
+    API endpoint to reallocate a site from one community to an adjacent community.
+    Uses service layer for business logic validation.
+    """
+    
+    def post(self, request):
+        """
+        Reallocate a site to an adjacent community.
+        
+        Request body:
+        {
+            "site_census_id": "uuid",
+            "to_community_id": "uuid",
+            "reason": "optional reason"
+        }
+        """
+        serializer = ReallocateSiteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        site_census_data = serializer.validated_data['site_census_data']
+        to_community = serializer.validated_data['to_community']
+        reason = serializer.validated_data.get('reason')
+        
+        # Use service layer for business logic
+        try:
+            reallocation = SiteReallocationService.reallocate(
+                site_census_data=site_census_data,
+                to_community=to_community,
+                user=request.user if request.user.is_authenticated else None,
+                reason=reason,
+                program=serializer.validated_data.get('program'),
+            )
+        except ValidationError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Return reallocation details
+        reallocation_serializer = SiteReallocationSerializer(reallocation)
+        return Response({
+            'message': 'Site reallocated successfully',
+            'reallocation': reallocation_serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+
+class UndoReallocationAPIView(APIView):
+    """
+    API endpoint to undo a site reallocation.
+    """
+    
+    def post(self, request, reallocation_id):
+        """
+        Undo a reallocation by ID.
+        """
+        try:
+            result = SiteReallocationService.undo_reallocation(
+                reallocation_id=reallocation_id,
+                user=request.user if request.user.is_authenticated else None
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class ReallocationHistoryAPIView(APIView):
+    """
+    API endpoint to get reallocation history for a site.
+    """
+    
+    def get(self, request, site_census_id):
+        """
+        Get reallocation history for a specific site census data.
+        """
+        try:
+            site_census_data = SiteCensusData.objects.get(id=site_census_id)
+        except SiteCensusData.DoesNotExist:
+            return Response(
+                {'error': f'Site census data with ID {site_census_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        history = SiteReallocationService.get_reallocation_history(site_census_data)
+        serializer = SiteReallocationSerializer(history, many=True)
+        
+        return Response({
+            'site_name': site_census_data.site.site_name,
+            'original_community': site_census_data.community.name if site_census_data.community else None,
+            'effective_community': site_census_data.effective_community.name if site_census_data.effective_community else None,
+            'reallocation_count': history.count(),
+            'history': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class AdjacentCommunityAllocationView(APIView):
+    """
+    API endpoint to get adjacent communities with allocation information.
+    Shows source community compliance and adjacent communities with their shortfalls/excesses.
+    """
+    
+    def get(self, request):
+        """
+        Get adjacent community allocation view.
+        
+        Query params:
+        - source_community_id: UUID of source community (required)
+        - census_year_id: UUID of census year (required)
+        - program: Optional program filter (Paint, Lighting, Solvents, Pesticides)
+        """
+        source_community_id = request.query_params.get('source_community_id')
+        census_year_id = request.query_params.get('census_year_id')
+        program = request.query_params.get('program')
+        
+        if not source_community_id:
+            return Response(
+                {'error': 'source_community_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not census_year_id:
+            return Response(
+                {'error': 'census_year_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            source_community = Community.objects.get(id=source_community_id)
+        except Community.DoesNotExist:
+            return Response(
+                {'error': f'Community with ID {source_community_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        try:
+            census_year = CensusYear.objects.get(id=census_year_id)
+        except CensusYear.DoesNotExist:
+            return Response(
+                {'error': f'Census year with ID {census_year_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Use service layer to get allocation data
+        allocation_data = SiteReallocationService.get_adjacent_communities_with_allocation(
+            source_community=source_community,
+            census_year=census_year,
+            program=program
+        )
+        
+        return Response(allocation_data, status=status.HTTP_200_OK)
+
+
+class AdjacentCommunityListCreate(APIView):
+    """
+    API endpoint to manage adjacent community relationships.
+    """
+    
+    def get(self, request):
+        """
+        List all adjacent community relationships.
+        Optional filters: from_community_id, census_year_id
+        """
+        from_community_id = request.query_params.get('from_community_id')
+        census_year_id = request.query_params.get('census_year_id')
+        
+        adjacencies = AdjacentCommunity.objects.all().select_related(
+            'from_community', 'census_year'
+        ).prefetch_related('to_communities')
+        
+        if from_community_id:
+            adjacencies = adjacencies.filter(from_community_id=from_community_id)
+        
+        if census_year_id:
+            adjacencies = adjacencies.filter(census_year_id=census_year_id)
+        
+        serializer = AdjacentCommunitySerializer(adjacencies, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def post(self, request):
+        """
+        Create or update an adjacent community relationship.
+        
+        Request body:
+        {
+            "from_community": "uuid",
+            "to_communities": ["uuid1", "uuid2", ...],
+            "census_year": "census_year_id"
+        }
+        """
+        from_community_id = request.data.get('from_community')
+        to_community_ids = request.data.get('to_communities', [])
+        census_year_id = request.data.get('census_year')
+        
+        if not from_community_id:
+            return Response(
+                {'error': 'from_community is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not census_year_id:
+            return Response(
+                {'error': 'census_year is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not to_community_ids or not isinstance(to_community_ids, list):
+            return Response(
+                {'error': 'to_communities must be a non-empty list of community IDs'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from_community = Community.objects.get(id=from_community_id)
+        except Community.DoesNotExist:
+            return Response(
+                {'error': f'Community with ID {from_community_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        try:
+            census_year = CensusYear.objects.get(id=census_year_id)
+        except CensusYear.DoesNotExist:
+            return Response(
+                {'error': f'Census year with ID {census_year_id} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Validate all to_communities exist
+        to_communities = []
+        for comm_id in to_community_ids:
+            try:
+                comm = Community.objects.get(id=comm_id)
+                if comm.id == from_community.id:
+                    return Response(
+                        {'error': 'A community cannot be adjacent to itself'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                to_communities.append(comm)
+            except Community.DoesNotExist:
+                return Response(
+                    {'error': f'Community with ID {comm_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        # Get or create the adjacency record
+        adjacency, created = AdjacentCommunity.objects.get_or_create(
+            from_community=from_community,
+            census_year=census_year
+        )
+        
+        # Set the to_communities (replaces existing)
+        adjacency.to_communities.set(to_communities)
+        
+        serializer = AdjacentCommunitySerializer(adjacency)
+        return Response({
+            'message': 'Adjacent community relationship created/updated successfully',
+            'created': created,
+            'adjacency': serializer.data
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class ExcessReallocationOverviewView(APIView):
+    """
+    API endpoint to list communities with excess capacity, their adjacent communities
+    with shortfalls, and how many sites have been reallocated.
+    """
+
+    def get(self, request):
+        census_year_id = request.query_params.get('census_year_id')
+        year_value = request.query_params.get('year')
+        program = request.query_params.get('program')
+
+        if not census_year_id and not year_value:
+            return Response(
+                {'error': 'Provide census_year_id or year query parameter'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        census_year = None
+        if census_year_id:
+            try:
+                census_year = CensusYear.objects.get(id=census_year_id)
+            except CensusYear.DoesNotExist:
+                return Response(
+                    {'error': f'Census year with ID {census_year_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        elif year_value:
+            try:
+                census_year = CensusYear.objects.get(year=year_value)
+            except CensusYear.DoesNotExist:
+                return Response(
+                    {'error': f'Census year {year_value} not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+        overview = SiteReallocationService.get_excess_communities_overview(
+            census_year=census_year,
+            program=program
+        )
+
+        return Response(
+            {
+                'census_year': census_year.year,
+                'program': program,
+                'count': len(overview),
+                'results': overview
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+class MapAdjacentReallocationOverviewView(APIView):
+    """
+    Tool C: adjacent reallocation using map-drawn Community.adjacent plus legacy
+    AdjacentCommunity, with census_year and per-program regulatory cap on inbound sites.
+    """
+
+    def get(self, request):
+        source_community_id = request.query_params.get('source_community_id')
+        census_year_id = request.query_params.get('census_year_id')
+        program = request.query_params.get('program')
+
+        if not source_community_id:
+            return Response(
+                {'error': 'source_community_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not census_year_id:
+            return Response(
+                {'error': 'census_year_id is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not program:
+            return Response(
+                {'error': 'program is required (Paint, Lighting, Solvents, Pesticides, Fertilizers)'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            UUID(str(source_community_id).strip())
+        except ValueError:
+            return Response(
+                {
+                    'error': 'source_community_id must be a valid community UUID.',
+                    'hint': 'List IDs from GET /api/community/map-communities/available/ or your communities API.',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            census_year_pk = int(census_year_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'census_year_id must be an integer primary key.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            source_community = Community.objects.get(id=source_community_id)
+        except Community.DoesNotExist:
+            return Response(
+                {'error': f'Community with ID {source_community_id} not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            census_year = CensusYear.objects.get(id=census_year_pk)
+        except CensusYear.DoesNotExist:
+            return Response(
+                {'error': f'Census year with ID {census_year_id} not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            data = SiteReallocationService.get_map_adjacent_reallocation_overview(
+                source_community=source_community,
+                census_year=census_year,
+                program=program,
+            )
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class ToolCAdjacentReallocationListView(APIView):
+    """
+    GET listing for Tool C UI: excess communities, eligible sites, adjacent shortfalls,
+    pagination and search (matches frontend getAdjacentReallocations).
+    """
+
+    def get(self, request):
+        program = request.query_params.get('program')
+        census_year_id = request.query_params.get('census_year_id')
+        year_value = request.query_params.get('year')
+        search = request.query_params.get('search')
+        ordering = request.query_params.get('ordering', 'name')
+
+        try:
+            page = int(request.query_params.get('page', 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = int(request.query_params.get('limit', 20))
+        except (TypeError, ValueError):
+            limit = 20
+
+        if not program:
+            return Response(
+                {'error': 'program query parameter is required (Paint, Lighting, ...).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        census_year = None
+        if census_year_id:
+            try:
+                census_year = CensusYear.objects.get(id=census_year_id)
+            except CensusYear.DoesNotExist:
+                return Response(
+                    {'error': f'Census year id {census_year_id} not found'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        elif year_value:
+            try:
+                census_year = CensusYear.objects.get(year=int(year_value))
+            except (CensusYear.DoesNotExist, ValueError):
+                return Response(
+                    {'error': f'Census year {year_value} not found'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            census_year = CensusYear.objects.order_by('-year').first()
+            if not census_year:
+                return Response(
+                    {'error': 'No census year in database; pass census_year_id or year.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            data = SiteReallocationService.get_tool_c_adjacent_reallocation_list(
+                census_year=census_year,
+                program=program,
+                search=search,
+                ordering=ordering,
+                page=page,
+                page_size=limit,
+            )
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        data['census_year'] = {'id': census_year.id, 'year': census_year.year}
+        data['program'] = program
+        return Response(data, status=status.HTTP_200_OK)

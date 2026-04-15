@@ -38,7 +38,7 @@ class RegulatoryRuleListCreate(APIView):
         if search_query:
             queryset = queryset.filter(
                 Q(regulatory_rule__name__icontains=search_query) |
-                Q(regulatory_rule__description__icontains=search_query)
+                Q(description__icontains=search_query)
             )
 
         # Filters

@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from decouple import config, Csv
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,14 +22,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-hj+2+o*ywt0200s9a+ze4u#x79_j2t-s&@fzpx7-zn_cr!=)r*'
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-hj+2+o*ywt0200s9a+ze4u#x79_j2t-s&@fzpx7-zn_cr!=)r*')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = [
-    '*'
-]
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=Csv())
 
 
 # Application definition
@@ -100,12 +100,12 @@ WSGI_APPLICATION = 'arc_backend.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'postgres',
-        'USER': 'Arc_New',
-        'PASSWORD': 'password',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'ENGINE': config('DB_ENGINE', default='django.db.backends.postgresql'),
+        'NAME': config('DB_NAME', default='postgres'),
+        'USER': config('DB_USER', default='Arc_New'),
+        'PASSWORD': config('DB_PASSWORD', default='password'),
+        'HOST': config('DB_HOST', default='localhost'),
+        'PORT': config('DB_PORT', default='5432'),
     }
 }
 
@@ -156,17 +156,30 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS settings
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='', cast=Csv()) if not CORS_ALLOW_ALL_ORIGINS else []
 
-# CSRF settings for ngrok
-CSRF_TRUSTED_ORIGINS = [
-    'https://05cb-203-88-135-90.ngrok-free.app',
-    'http://05cb-203-88-135-90.ngrok-free.app',
-]
+# CSRF settings for ngrok and production
+def format_csrf_origins(origins):
+    """Ensure CSRF origins have proper scheme"""
+    formatted = []
+    for origin in origins:
+        origin = origin.strip()
+        if origin and not origin.startswith(('http://', 'https://')):
+            # Default to https for production-like domains, http for local IPs
+            if any(local in origin for local in ['127.0.0.1', 'localhost', '192.168.', '10.']):
+                origin = f'http://{origin}'
+            else:
+                origin = f'https://{origin}'
+        formatted.append(origin)
+    return formatted
+
+csrf_origins = config('CSRF_TRUSTED_ORIGINS', default='https://arcgis-frontend.vercel.app/', cast=Csv())
+CSRF_TRUSTED_ORIGINS = format_csrf_origins(csrf_origins)
 
 # Celery Configuration
-CELERY_BROKER_URL = 'redis://127.0.0.1:6379/0'
-CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/0'
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.0.0.1:6379/0')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.0.0.1:6379/0')
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'

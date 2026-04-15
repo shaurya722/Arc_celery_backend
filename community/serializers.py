@@ -1,5 +1,8 @@
 from rest_framework import serializers
 from django.db.models import Q
+from functools import reduce
+import operator
+from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from .models import Community, CensusYear, CommunityCensusData, AdjacentCommunity
 
 
@@ -261,7 +264,7 @@ class CensusYearSerializer(serializers.ModelSerializer):
     """Serializer for CensusYear"""
     class Meta:
         model = CensusYear
-        fields = ['id', 'year', 'created_at', 'updated_at']
+        fields = ['id', 'year', 'start_date', 'end_date', 'created_at', 'updated_at']
 
 
 class CensusYearWithDataSerializer(serializers.ModelSerializer):
@@ -272,7 +275,7 @@ class CensusYearWithDataSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = CensusYear
-        fields = ['id', 'year', 'communities', 'sites', 'regulatory_rules', 'created_at', 'updated_at']
+        fields = ['id', 'year', 'start_date', 'end_date', 'communities', 'sites', 'regulatory_rules', 'created_at', 'updated_at']
     
     def get_communities(self, obj):
         """Return communities that have census data for this year"""
@@ -313,7 +316,7 @@ class CensusYearWithDataSerializer(serializers.ModelSerializer):
                 'id': census_data.id,
                 'rule_id': str(rule.id),
                 'rule_name': rule.name,
-                'description': rule.description,
+                'description': census_data.description,
                 'program': census_data.program,
                 'category': census_data.category,
                 'rule_type': census_data.rule_type,
@@ -336,7 +339,25 @@ class MapDataSerializer(serializers.Serializer):
     def to_representation(self, instance):
         """Transform Django data into React component expected format"""
         request = self.context.get('request')
-        census_year_param = request.query_params.get('census_year') if request else None
+        filters = request.query_params if request else {}
+
+        # Parse filters that should be lists
+        def parse_list_filter(value):
+            """Parse comma-separated string or list into list"""
+            if isinstance(value, str):
+                return [item.strip() for item in value.split(',') if item.strip()]
+            elif isinstance(value, list):
+                return value
+            return []
+
+        parsed_filters = {}
+        for key, value in filters.items():
+            if key in ['operator_types', 'site_types', 'municipalities', 'status', 'programs']:
+                parsed_filters[key] = parse_list_filter(value)
+            else:
+                parsed_filters[key] = value
+
+        census_year_param = parsed_filters.get('census_year')
 
         # Get census year or use latest
         census_year = None
@@ -353,11 +374,46 @@ class MapDataSerializer(serializers.Serializer):
 
         # Filter sites and communities by census year
         # Get municipalities (communities) for this census year
-        municipalities_data = []
-        for community_data in CommunityCensusData.objects.filter(
+        municipalities_queryset = CommunityCensusData.objects.filter(
             census_year=census_year,
             is_active=True
-        ).select_related('community'):
+        ).select_related('community')
+
+        # Apply search filter to municipalities if provided
+        if parsed_filters.get('search'):
+            municipalities_queryset = municipalities_queryset.filter(
+                community__name__icontains=parsed_filters['search']
+            )
+
+        municipalities_data = []
+        municipalities_pagination_info = None
+
+        # Handle municipalities pagination
+        if parsed_filters.get('municipalities_page') and parsed_filters.get('municipalities_limit'):
+            try:
+                municipalities_page = int(parsed_filters['municipalities_page'])
+                municipalities_limit = int(parsed_filters['municipalities_limit'])
+                if municipalities_limit > 100:  # Max limit
+                    municipalities_limit = 100
+                if municipalities_limit < 1:
+                    municipalities_limit = 1
+                if municipalities_page < 1:
+                    municipalities_page = 1
+
+                municipalities_paginator = Paginator(municipalities_queryset, municipalities_limit)
+                paginated_municipalities = municipalities_paginator.page(municipalities_page)
+                municipalities_pagination_info = {
+                    'page': paginated_municipalities.number,
+                    'limit': municipalities_limit,
+                    'total': municipalities_paginator.count,
+                    'total_pages': municipalities_paginator.num_pages
+                }
+            except (PageNotAnInteger, EmptyPage, ValueError):
+                paginated_municipalities = municipalities_queryset
+        else:
+            paginated_municipalities = municipalities_queryset
+
+        for community_data in paginated_municipalities:
             municipalities_data.append({
                 'id': str(community_data.community.id),
                 'name': community_data.community.name,
@@ -367,21 +423,100 @@ class MapDataSerializer(serializers.Serializer):
 
         # Get sites for this census year
         from sites.models import SiteCensusData
-        sites_data = []
-
-        for site_census in SiteCensusData.objects.filter(
+        sites_queryset = SiteCensusData.objects.filter(
             census_year=census_year,
-            is_active=True
-        ).filter(
-            ~Q(site_type='Event') | Q(event_approved=True)
-        ).select_related('site', 'community'):
+        )
+
+        # Apply filters
+        if parsed_filters.get('search'):
+            search_query = parsed_filters['search']
+            sites_queryset = sites_queryset.filter(
+                Q(site__site_name__icontains=search_query) | Q(community__name__icontains=search_query)
+            )
+
+        if parsed_filters.get('site_types'):
+            sites_queryset = sites_queryset.filter(site_type__in=parsed_filters['site_types'])
+
+        if parsed_filters.get('operator_types'):
+            sites_queryset = sites_queryset.filter(operator_type__in=parsed_filters['operator_types'])
+
+        if parsed_filters.get('municipalities'):
+            sites_queryset = sites_queryset.filter(community__name__in=parsed_filters['municipalities'])
+
+        if parsed_filters.get('status'):
+            status_filters = []
+            if 'Active' in parsed_filters['status']:
+                status_filters.append(Q(is_active=True))
+            if 'Inactive' in parsed_filters['status']:
+                status_filters.append(Q(is_active=False))
+            if status_filters:
+                sites_queryset = sites_queryset.filter(reduce(operator.or_, status_filters))
+
+        if parsed_filters.get('programs'):
+            program_filters = []
+            program_fields = {
+                'Paint': 'program_paint',
+                'Lighting': 'program_lights',
+                'Solvents': 'program_solvents',
+                'Pesticides': 'program_pesticides',
+                'Fertilizers': 'program_fertilizers',
+            }
+            for program in parsed_filters['programs']:
+                field = program_fields.get(program)
+                if field:
+                    program_filters.append(Q(**{field: True}))
+            if program_filters:
+                sites_queryset = sites_queryset.filter(reduce(operator.or_, program_filters))
+
+        sites_data = []
+        paginated_sites = None
+        sites_pagination_info = None
+
+        # Handle sites pagination
+        if parsed_filters.get('page') and parsed_filters.get('limit'):
+            try:
+                page = int(parsed_filters['page'])
+                limit = int(parsed_filters['limit'])
+                if limit > 100:  # Max limit
+                    limit = 100
+                if limit < 1:
+                    limit = 1
+                if page < 1:
+                    page = 1
+
+                paginator = Paginator(sites_queryset, limit)
+                paginated_sites = paginator.page(page)
+                sites_pagination_info = {
+                    'page': paginated_sites.number,
+                    'limit': limit,
+                    'total': paginator.count,
+                    'total_pages': paginator.num_pages
+                }
+            except (PageNotAnInteger, EmptyPage, ValueError):
+                paginated_sites = sites_queryset
+                sites_pagination_info = None
+        else:
+            paginated_sites = sites_queryset
+            sites_pagination_info = None
+
+        for site_census in paginated_sites:
             site = site_census.site
             community = site_census.community
 
             # Get municipality info
             municipality_info = None
             if community:
-                municipality_info = {'name': community.name}
+                # Get population from community census data
+                community_census = CommunityCensusData.objects.filter(
+                    community=community,
+                    census_year=census_year
+                ).first()
+                population = community_census.population if community_census else 0
+                
+                municipality_info = {
+                    'name': community.name,
+                    'population': population
+                }
 
             # Parse programs from the site census data
             programs = []
@@ -428,5 +563,9 @@ class MapDataSerializer(serializers.Serializer):
             'census_year': {
                 'id': census_year.id,
                 'year': census_year.year,
-            }
+            },
+            'pagination': {
+                'sites': sites_pagination_info,
+                'municipalities': municipalities_pagination_info,
+            } if sites_pagination_info or municipalities_pagination_info else None
         }

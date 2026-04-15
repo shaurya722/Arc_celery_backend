@@ -123,8 +123,8 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
             try:
                 census_year = CensusYear.objects.get(id=census_year_id)
             except CensusYear.DoesNotExist:
-                logger.error(f"Census year with id {census_year_id} not found")
-                raise
+                logger.error(f"Census year with id {census_year_id} not found - skipping compliance calculation for community {community.id}")
+                return []
         else:
             # Get the latest census year for this community
             latest_census_data = community.census_data.order_by('-census_year__year').first()

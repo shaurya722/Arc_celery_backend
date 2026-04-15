@@ -3,9 +3,14 @@ from .models import Community, CensusYear, CommunityCensusData, AdjacentCommunit
 
 
 class CommunityAdmin(admin.ModelAdmin):
-    list_display = ['id', 'name', 'created_at', 'updated_at']
+    list_display = ['id', 'name', 'has_boundary', 'created_at', 'updated_at']
     search_fields = ['name']
     readonly_fields = ['id', 'created_at', 'updated_at']
+    filter_horizontal = ['adjacent']
+
+    @admin.display(description='Boundary', boolean=True)
+    def has_boundary(self, obj):
+        return obj.boundary is not None
 
 
 class CensusYearAdmin(admin.ModelAdmin):

@@ -29,10 +29,6 @@ class SiteCensusData(models.Model):
     SITE_TYPE_CHOICES = [
        ('Collection Site', 'Collection Site'),
         ('Event', 'Event'),
-        ('Municipal Depot', 'Municipal Depot'),
-        ('Seasonal Depot', 'Seasonal Depot'),
-        ('Return to Retail', 'Return to Retail'),
-        ('Private Depot', 'Private Depot'),
     ]
     
     OPERATOR_TYPE_CHOICES = [
@@ -114,6 +110,21 @@ class SiteCensusData(models.Model):
     program_fertilizers_start_date = models.DateTimeField(null=True, blank=True)
     program_fertilizers_end_date = models.DateTimeField(null=True, blank=True, db_index=True)
     
+    # Materials services (year-specific)
+    material_paint = models.BooleanField(default=False)
+    material_light_bulbs = models.BooleanField(default=False)
+    material_batteries = models.BooleanField(default=False)
+    material_oil_filters = models.BooleanField(default=False)
+    material_tires = models.BooleanField(default=False)
+    material_electronics = models.BooleanField(default=False)
+    material_household_hazardous_waste = models.BooleanField(default=False)
+    
+    # Collection sectors (year-specific)
+    sector_residential = models.BooleanField(default=False)
+    sector_commercial = models.BooleanField(default=False)
+    sector_industrial = models.BooleanField(default=False)
+    sector_institutional = models.BooleanField(default=False)
+    
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -145,9 +156,18 @@ class SiteCensusData(models.Model):
         )
     
     def save(self, *args, **kwargs):
-        # For Event sites, is_active mirrors event_approved
+        # For Event sites: sync is_active and event_approved bidirectionally
         if self.site_type == 'Event':
-            self.is_active = self.event_approved
+            # If this is a new Event site being created, set it as active by default
+            if not self.pk:  # New instance
+                self.is_active = True
+                self.event_approved = True
+            else:
+                # For existing Event sites, ensure both properties are always in sync
+                # If event_approved is set to false, is_active should also be false
+                # If event_approved is set to true, is_active should also be true
+                # Both properties should change together in either direction
+                self.is_active = self.event_approved
         
         # Nullify dates if program is disabled
         if not self.program_paint:
@@ -171,3 +191,68 @@ class SiteCensusData(models.Model):
             self.is_active = False
         
         super().save(*args, **kwargs)
+    
+    @property
+    def effective_community(self):
+        """
+        Returns the effective community after considering reallocations.
+        If site has been reallocated, returns the latest destination community.
+        Otherwise, returns the original community.
+        """
+        latest_reallocation = self.reallocations.order_by('-reallocated_at').first()
+        return latest_reallocation.to_community if latest_reallocation else self.community
+
+
+class SiteReallocation(models.Model):
+    """
+    Tracks site reallocation history from one community to another.
+    This preserves full audit trail and allows undo/rollback.
+    NEVER directly modify SiteCensusData.community - always create a reallocation record.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    site_census_data = models.ForeignKey(
+        SiteCensusData,
+        on_delete=models.CASCADE,
+        related_name='reallocations'
+    )
+    
+    from_community = models.ForeignKey(
+        'community.Community',
+        on_delete=models.CASCADE,
+        related_name='reallocations_from'
+    )
+    
+    to_community = models.ForeignKey(
+        'community.Community',
+        on_delete=models.CASCADE,
+        related_name='reallocations_to'
+    )
+    
+    census_year = models.ForeignKey(
+        'community.CensusYear',
+        on_delete=models.CASCADE,
+        related_name='site_reallocations'
+    )
+    
+    reallocated_at = models.DateTimeField(auto_now_add=True)
+    
+    created_by = models.ForeignKey(
+        'auth.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True
+    )
+    
+    reason = models.TextField(blank=True, null=True, help_text="Reason for reallocation")
+    
+    class Meta:
+        ordering = ['-reallocated_at']
+        indexes = [
+            models.Index(fields=['site_census_data', '-reallocated_at']),
+            models.Index(fields=['from_community', 'census_year']),
+            models.Index(fields=['to_community', 'census_year']),
+        ]
+    
+    def __str__(self):
+        return f"{self.site_census_data.site.site_name}: {self.from_community.name} → {self.to_community.name}"

@@ -6,13 +6,17 @@ from .views import (
     CommunityCensusDataDetail,
     CensusYearListCreate,
     CensusYearDetail,
+    YearData,
     YearDropdown,
     CommunityDropdown,
     AdjacentCommunityReallocationListCreate,
     AdjacentCommunityReallocationDetail,
     MapDataView,
     CommunityCensusDataImportExport,
-    CommunityCensusDataImportTemplate
+    CommunityCensusDataImportTemplate,
+    CommunityMapBoundaryListCreate,
+    CommunityMapBoundaryDetail,
+    CommunityMapAvailableForAssignment,
 )
 
 urlpatterns = [
@@ -30,6 +34,7 @@ urlpatterns = [
     
     # Year Dropdown with CRUD
     path('years/', YearDropdown.as_view(), name='year-dropdown'),
+    path('year-data/', YearData.as_view(), name='year-data'),
     path('years/<int:pk>/', YearDropdown.as_view(), name='year-dropdown-detail'),
 
     # Community dropdown API
@@ -45,4 +50,17 @@ urlpatterns = [
 
     # Map Data API
     path('map-data/', MapDataView.as_view(), name='map-data'),
+
+    # PostGIS boundaries + adjacency (Leaflet draw → neighbors)
+    path(
+        'map-communities/available/',
+        CommunityMapAvailableForAssignment.as_view(),
+        name='community-map-available',
+    ),
+    path('map-communities/', CommunityMapBoundaryListCreate.as_view(), name='community-map-boundaries'),
+    path(
+        'map-communities/<uuid:pk>/',
+        CommunityMapBoundaryDetail.as_view(),
+        name='community-map-boundary-detail',
+    ),
 ]

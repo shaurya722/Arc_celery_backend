@@ -5,6 +5,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import F, Exists, OuterRef, Q, Sum, Avg
+from community.models import (
+    Community,
+    CensusYear,
+    CommunityCensusData,
+    AdjacentCommunity,
+)
 from .models import ComplianceCalculation
 from .serializers import ComplianceCalculationSerializer
 from .tasks import calculate_community_compliance
@@ -240,12 +246,32 @@ class ManualComplianceRecalculation(APIView):
         
         # Trigger async calculation for all communities
         task = calculate_all_compliance.delay(census_year_id)
-        
+
+        # Prepare adjacency overview for this census year
+        adjacency_records = AdjacentCommunity.objects.filter(
+            census_year=census_year
+        ).select_related('from_community').prefetch_related('to_communities')
+
+        adjacency_overview = []
+        for record in adjacency_records:
+            adjacency_overview.append({
+                'from_community_id': str(record.from_community_id),
+                'from_community': record.from_community.name,
+                'to_communities': [
+                    {
+                        'id': str(comm.id),
+                        'name': comm.name
+                    }
+                    for comm in record.to_communities.all()
+                ]
+            })
+
         return Response({
             'message': 'Full compliance recalculation triggered successfully',
             'task_id': task.id,
             'census_year': census_year_value,
             'census_year_id': census_year_id,
             'description': 'Recalculating compliance for all active communities with all regulatory rules and site data',
-            'status': 'processing'
+            'status': 'processing',
+            'adjacent_communities': adjacency_overview
         }, status=status.HTTP_202_ACCEPTED)
