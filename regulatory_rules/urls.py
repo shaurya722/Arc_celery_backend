@@ -12,5 +12,5 @@ def api_root(request, format=None):
 urlpatterns = [
     path('', api_root),
     path('rules/', views.RegulatoryRuleListCreate.as_view(), name='rule-list'),
-    path('rules/<uuid:pk>/', views.RegulatoryRuleDetail.as_view(), name='rule-detail'),
+    path('rules/<int:pk>/', views.RegulatoryRuleDetail.as_view(), name='rule-detail'),
 ]

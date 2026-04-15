@@ -4,57 +4,75 @@ Compliance calculation utilities.
 import math
 from typing import Dict, Optional
 from django.db.models import Q
-from regulatory_rules.models import RegulatoryRule
-from community.models import Community
-from sites.models import Site
+from regulatory_rules.models import RegulatoryRule, RegulatoryRuleCensusData
+from community.models import Community, CommunityCensusData, CensusYear
+from sites.models import Site, SiteCensusData
 
 
 def calculate_required_sites_from_rule(
     community: Community,
     program: str,
-    year: Optional[int] = None
+    census_year: Optional[CensusYear] = None
 ) -> Optional[int]:
     """
-    Calculate required sites based on RegulatoryRule.
+    Calculate required sites based on RegulatoryRuleCensusData.
     
     Args:
         community: Community instance
         program: Program name (Paint, Lighting, Solvents, Pesticides)
-        year: Year for the rule (defaults to community.year)
+        census_year: CensusYear instance (defaults to latest census year for community)
     
     Returns:
         Number of required sites or None if no rule found
     """
-    if year is None:
-        year = community.year
+    if census_year is None:
+        # Get the latest census year for this community
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return None  # No census data for this community
     
-    population = community.population
+    # Get community census data for this year
+    try:
+        community_census = CommunityCensusData.objects.get(
+            community=community,
+            census_year=census_year
+        )
+        population = community_census.population
+    except CommunityCensusData.DoesNotExist:
+        return None
     
-    # Query for active Site Requirements rules matching program, year, and category
-    rules = RegulatoryRule.objects.filter(
+    # Query for active Site Requirements rules matching program and census year
+    rule_census_data = RegulatoryRuleCensusData.objects.filter(
         program=program,
-        year=year,
+        census_year=census_year,
         rule_type='Site Requirements',
         is_active=True
     ).filter(
         Q(min_population__lte=population) | Q(min_population__isnull=True),
         Q(max_population__gte=population) | Q(max_population__isnull=True)
-    ).order_by('min_population')
+    ).select_related('regulatory_rule').order_by('min_population')
     
-    for rule in rules:
+    for rule_data in rule_census_data:
         # Check if population falls within rule's range
-        if rule.min_population is not None and population < rule.min_population:
+        if rule_data.min_population is not None and population < rule_data.min_population:
             continue
-        if rule.max_population is not None and population > rule.max_population:
+        if rule_data.max_population is not None and population > rule_data.max_population:
             continue
         
         # Calculate based on rule
-        if rule.base_required_sites is not None:
-            # Flat base requirement
-            required = rule.base_required_sites
-        elif rule.site_per_population is not None:
-            # Calculate based on population divisor
-            required = math.ceil(population / rule.site_per_population)
+        # Formula: required_sites = ceil(population / site_per_population) * base_required_sites
+        if rule_data.site_per_population is not None and rule_data.base_required_sites is not None:
+            # Both values present: multiply them
+            value_a = math.ceil(population / rule_data.site_per_population)
+            required = value_a * rule_data.base_required_sites
+        elif rule_data.base_required_sites is not None:
+            # Only base requirement (flat requirement)
+            required = rule_data.base_required_sites
+        elif rule_data.site_per_population is not None:
+            # Only population divisor
+            required = math.ceil(population / rule_data.site_per_population)
         else:
             continue
         
@@ -108,36 +126,54 @@ def calculate_required_sites_fallback(population: int, program: str) -> int:
 def calculate_required_sites(
     community: Community,
     program: str,
-    year: Optional[int] = None
+    census_year: Optional[CensusYear] = None
 ) -> int:
     """
-    Calculate required sites with RegulatoryRule priority and fallback.
+    Calculate required sites with RegulatoryRuleCensusData priority and fallback.
     
     Args:
         community: Community instance
         program: Program name
-        year: Year for the rule (defaults to community.year)
+        census_year: CensusYear instance (defaults to latest census year for community)
     
     Returns:
         Number of required sites
     """
-    # Try RegulatoryRule first
-    required = calculate_required_sites_from_rule(community, program, year)
+    # Try RegulatoryRuleCensusData first
+    required = calculate_required_sites_from_rule(community, program, census_year)
     
     # Fallback to standard calculation
     if required is None:
-        required = calculate_required_sites_fallback(community.population, program)
+        # Get population from census data
+        if census_year is None:
+            latest_census_data = community.census_data.order_by('-census_year__year').first()
+            if latest_census_data:
+                population = latest_census_data.population
+            else:
+                return 0
+        else:
+            try:
+                community_census = CommunityCensusData.objects.get(
+                    community=community,
+                    census_year=census_year
+                )
+                population = community_census.population
+            except CommunityCensusData.DoesNotExist:
+                return 0
+        
+        required = calculate_required_sites_fallback(population, program)
     
     return required
 
 
-def count_actual_sites(community: Community, program: str) -> int:
+def count_actual_sites(community: Community, program: str, census_year: Optional[CensusYear] = None) -> int:
     """
-    Count actual active sites for a community and program.
+    Count actual active sites for a community and program in a specific census year.
     
     Args:
         community: Community instance
         program: Program name (Paint, Lighting, Solvents, Pesticides, Fertilizers)
+        census_year: CensusYear instance (defaults to latest census year for community)
     
     Returns:
         Number of active sites
@@ -154,48 +190,162 @@ def count_actual_sites(community: Community, program: str) -> int:
     if not program_field:
         return 0
     
-    # Count active sites with the program enabled
-    filter_kwargs = {
-        'community': community,
-        'is_active': True,
-        program_field: True
-    }
+    if census_year is None:
+        # Get the latest census year for this community
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return 0
     
-    return Site.objects.filter(**filter_kwargs).count()
+    # Count active sites with the program enabled that are associated with this community in this census year
+    queryset = SiteCensusData.objects.filter(
+        community=community,
+        census_year=census_year,
+        is_active=True,
+        **{program_field: True}
+    )
+    
+    # For Event sites, also require approval
+    queryset = queryset.filter(
+        ~Q(site_type='Event') | Q(event_approved=True)
+    )
+    
+    return queryset.count()
+
+
+def calculate_required_events(
+    community: Community,
+    census_year: Optional[CensusYear] = None
+) -> int:
+    """
+    Calculate required events based on RegulatoryRuleCensusData with rule_type='Events'.
+    
+    Args:
+        community: Community instance
+        census_year: CensusYear instance (defaults to latest census year for community)
+    
+    Returns:
+        Number of required events
+    """
+    if census_year is None:
+        # Get the latest census year for this community
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return 0  # No census data for this community
+    
+    # Get community census data for this year
+    try:
+        community_census = CommunityCensusData.objects.get(
+            community=community,
+            census_year=census_year
+        )
+        population = community_census.population
+    except CommunityCensusData.DoesNotExist:
+        return 0
+    
+    # Query for active Events rules matching census year
+    rule_census_data = RegulatoryRuleCensusData.objects.filter(
+        census_year=census_year,
+        rule_type='Events',
+        is_active=True
+    ).filter(
+        Q(min_population__lte=population) | Q(min_population__isnull=True),
+        Q(max_population__gte=population) | Q(max_population__isnull=True)
+    ).select_related('regulatory_rule').order_by('min_population')
+    
+    for rule_data in rule_census_data:
+        # Check if population falls within rule's range
+        if rule_data.min_population is not None and population < rule_data.min_population:
+            continue
+        if rule_data.max_population is not None and population > rule_data.max_population:
+            continue
+        
+        # For events, perhaps use base_required_sites or calculate based on population
+        if rule_data.base_required_sites is not None:
+            required = rule_data.base_required_sites
+        elif rule_data.site_per_population is not None:
+            required = math.ceil(population / rule_data.site_per_population)
+        else:
+            continue
+        
+        return required
+    
+    return 0  # No rule found
 
 
 def calculate_compliance(
     community: Community,
     program: str,
-    year: Optional[int] = None
+    census_year: Optional[CensusYear] = None
 ) -> Dict:
     """
-    Calculate compliance metrics for a community and program.
+    Calculate compliance metrics for a community and program in a specific census year.
+    Uses is_active status from Community Census Data, Regulatory Rule Census Data, and Site Census Data.
+    
+    Returns zero metrics when community is inactive or no active rules exist (instead of None).
     
     Args:
         community: Community instance
         program: Program name
-        year: Year for the rule (defaults to community.year)
+        census_year: CensusYear instance (defaults to latest census year for community)
     
     Returns:
-        Dictionary with compliance metrics:
+        Dictionary with compliance metrics (returns zeros if inactive):
         - required_sites: int
         - actual_sites: int
         - shortfall: int (0 if compliant)
         - excess: int (0 if not compliant)
         - compliance_rate: float (percentage)
     """
-    if not community.is_active:
-        return {
-            'required_sites': 0,
-            'actual_sites': 0,
-            'shortfall': 0,
-            'excess': 0,
-            'compliance_rate': 0.0
-        }
+    # Zero metrics to return when inactive
+    zero_metrics = {
+        'required_sites': 0,
+        'actual_sites': 0,
+        'shortfall': 0,
+        'excess': 0,
+        'compliance_rate': 0.0
+    }
     
-    required_sites = calculate_required_sites(community, program, year)
-    actual_sites = count_actual_sites(community, program)
+    # Get census year if not provided
+    if census_year is None:
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return zero_metrics  # No census data - return zeros
+    
+    # Check if community is active in this census year (Community Census Data is_active)
+    try:
+        community_census = CommunityCensusData.objects.get(
+            community=community,
+            census_year=census_year
+        )
+        if not community_census.is_active:
+            # Community not active - return zero metrics
+            return zero_metrics
+    except CommunityCensusData.DoesNotExist:
+        # No census data for community - return zero metrics
+        return zero_metrics
+    
+    # Check if there are any active regulatory rules for this program in this census year
+    active_rules_exist = RegulatoryRuleCensusData.objects.filter(
+        program=program,
+        census_year=census_year,
+        is_active=True
+    ).exists()
+    
+    if not active_rules_exist:
+        # No active regulatory rules for this program - return zero metrics
+        return zero_metrics
+    
+    # Calculate required sites (uses active Regulatory Rule Census Data)
+    required_sites = calculate_required_sites(community, program, census_year)
+    
+    # Count actual sites (uses active Site Census Data)
+    actual_sites = count_actual_sites(community, program, census_year)
     
     shortfall = max(0, required_sites - actual_sites)
     excess = max(0, actual_sites - required_sites)

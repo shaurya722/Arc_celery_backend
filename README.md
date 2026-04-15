@@ -83,6 +83,8 @@ For better load balancing, run multiple worker instances with different hostname
 ```bash
 celery -A arc_backend worker --loglevel=info --hostname=worker1@%h --concurrency=2 &
 celery -A arc_backend worker --loglevel=info --hostname=worker2@%h --concurrency=2 &
+celery -A arc_backend worker --loglevel=info --hostname=worker3@%h --concurrency=2 $
+celery -A arc_backend worker --loglevel=info --hostname=worker4@%h --concurrency=2
 ```
 This distributes tasks across workers. Increase concurrency or add more workers as needed.
 
