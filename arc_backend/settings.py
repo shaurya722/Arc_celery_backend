@@ -188,8 +188,30 @@ CELERY_TIMEZONE = 'Asia/Kolkata'
 CELERY_ENABLE_UTC = False
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
-# Logging Configuration
+# Logging: Vercel mounts the deployment under a read-only tree (/var/task). A FileHandler
+# writing to BASE_DIR/celery_logs.log fails at import with OSError 30 (read-only fs).
 CELERY_LOG_FILE = BASE_DIR / 'celery_logs.log'
+_is_vercel = bool(os.environ.get('VERCEL'))
+_file_logging_opt_in = config('DJANGO_FILE_LOGGING', default=False, cast=bool)
+_use_file_log = (not _is_vercel) or _file_logging_opt_in
+_log_file_path = (Path('/tmp') / 'celery_logs.log') if _is_vercel else CELERY_LOG_FILE
+
+_handlers = {
+    'console': {
+        'level': 'INFO',
+        'class': 'logging.StreamHandler',
+        'formatter': 'verbose',
+    },
+}
+_task_handlers = ['console']
+if _use_file_log:
+    _handlers['celery_file'] = {
+        'level': 'INFO',
+        'class': 'logging.FileHandler',
+        'filename': str(_log_file_path),
+        'formatter': 'verbose',
+    }
+    _task_handlers = ['console', 'celery_file']
 
 LOGGING = {
     'version': 1,
@@ -200,32 +222,20 @@ LOGGING = {
             'style': '{',
         },
     },
-    'handlers': {
-        'console': {
-            'level': 'INFO',
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-        'celery_file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': str(CELERY_LOG_FILE),
-            'formatter': 'verbose',
-        },
-    },
+    'handlers': _handlers,
     'loggers': {
         'complaince.tasks': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
         'complaince.signals': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
         'regulatory_rules.tasks': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
