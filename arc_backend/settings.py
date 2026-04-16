@@ -188,13 +188,18 @@ CELERY_TIMEZONE = 'Asia/Kolkata'
 CELERY_ENABLE_UTC = False
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
-# Logging: Vercel mounts the deployment under a read-only tree (/var/task). A FileHandler
-# writing to BASE_DIR/celery_logs.log fails at import with OSError 30 (read-only fs).
+# Logging: Serverless platforms like Vercel mount the deployment under a read-only tree (/var/task).
+# A FileHandler writing to BASE_DIR/celery_logs.log fails at import with OSError 30 (read-only fs).
 CELERY_LOG_FILE = BASE_DIR / 'celery_logs.log'
-_is_vercel = bool(os.environ.get('VERCEL'))
+_is_serverless = (
+    bool(os.environ.get('VERCEL')) or
+    bool(os.environ.get('VERCEL_ENV')) or
+    bool(os.environ.get('AWS_LAMBDA_FUNCTION_NAME')) or
+    str(BASE_DIR).startswith('/var/task')  # Vercel specific
+)
 _file_logging_opt_in = config('DJANGO_FILE_LOGGING', default=False, cast=bool)
-_use_file_log = (not _is_vercel) or _file_logging_opt_in
-_log_file_path = (Path('/tmp') / 'celery_logs.log') if _is_vercel else CELERY_LOG_FILE
+_use_file_log = (not _is_serverless) and _file_logging_opt_in  # Only enable if explicitly opted in AND not serverless
+_log_file_path = (Path('/tmp') / 'celery_logs.log') if _is_serverless else CELERY_LOG_FILE
 
 _handlers = {
     'console': {
