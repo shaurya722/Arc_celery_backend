@@ -2,7 +2,8 @@
 Adjacent site reallocation rules (Tool C): map + legacy adjacency, regulatory cap, excess/shortfall.
 
 See ss.md §5. Cap: reallocation_percentage from RegulatoryRuleCensusData (rule_type=Reallocation)
-per program + census year, default 35% of target community required sites (floor).
+per program + census year, default 35% of target community required sites (ceil so small
+required counts are not capped to zero, e.g. 35% of 1 required → 1 inbound slot).
 """
 from __future__ import annotations
 
@@ -106,9 +107,10 @@ def max_inbound_reallocations_allowed(
     required_sites: int,
 ) -> int:
     pct = get_reallocation_percentage_cap(census_year, program)
-    if required_sites <= 0:
+    if required_sites <= 0 or pct <= 0:
         return 0
-    return int(math.floor(required_sites * (pct / 100.0)))
+    # ceil: floor(1 * 0.35) == 0 would forbid any inbound move for required_sites=1
+    return int(math.ceil(required_sites * (pct / 100.0)))
 
 
 def reallocation_cap_status(

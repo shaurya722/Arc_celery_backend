@@ -189,19 +189,45 @@ CELERY_ENABLE_UTC = False
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
 # Logging Configuration
+CELERY_LOG_FILE = BASE_DIR / 'celery_logs.log'
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{levelname}] {asctime} {name}: {message}',
+            'style': '{',
+        },
+    },
     'handlers': {
         'console': {
             'level': 'INFO',
             'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'celery_file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': str(CELERY_LOG_FILE),
+            'formatter': 'verbose',
         },
     },
     'loggers': {
-        'regulatory_rules.tasks': {
-            'handlers': ['console'],
+        'complaince.tasks': {
+            'handlers': ['console', 'celery_file'],
             'level': 'INFO',
+            'propagate': False,
+        },
+        'complaince.signals': {
+            'handlers': ['console', 'celery_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'regulatory_rules.tasks': {
+            'handlers': ['console', 'celery_file'],
+            'level': 'INFO',
+            'propagate': False,
         },
     },
 }

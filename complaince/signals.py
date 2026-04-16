@@ -2,9 +2,9 @@
 Signals for automatic compliance recalculation when underlying data changes.
 """
 import logging
+from django.db import transaction
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
-from django.db import transaction
 from community.models import CommunityCensusData, CensusYear
 from sites.models import SiteCensusData
 from regulatory_rules.models import RegulatoryRuleCensusData
@@ -22,7 +22,10 @@ def recalculate_compliance_on_community_change(sender, instance, created, **kwar
     """
     try:
         from .models import ComplianceCalculation
-        
+
+        if not instance.community_id or not instance.census_year_id:
+            return
+
         if instance.is_active:
             # Community is active - recalculate compliance
             logger.info(
@@ -30,11 +33,13 @@ def recalculate_compliance_on_community_change(sender, instance, created, **kwar
                 f"Triggering compliance recalculation."
             )
 
-            # Trigger async compliance calculation
-            calculate_community_compliance.delay(
-                community_id=str(instance.community.id),
-                census_year_id=instance.census_year.id
-            )
+            cid = str(instance.community_id)
+            cyid = instance.census_year_id
+
+            def _enqueue():
+                calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+
+            transaction.on_commit(_enqueue)
         else:
             # Community is inactive - set all compliance to zero
             updated_count = ComplianceCalculation.objects.filter(
@@ -65,6 +70,8 @@ def recalculate_compliance_on_site_change(sender, instance, created, **kwargs):
     This will recalculate compliance for programs that might be affected by site changes.
     """
     try:
+        if not instance.community_id or not instance.census_year_id:
+            return
         # Only recalculate if the site is active in this census year
         if instance.is_active:
             logger.info(
@@ -73,11 +80,13 @@ def recalculate_compliance_on_site_change(sender, instance, created, **kwargs):
                 f"Triggering compliance recalculation."
             )
 
-            # Trigger compliance calculation for the affected community
-            calculate_community_compliance.delay(
-                community_id=str(instance.community.id),
-                census_year_id=instance.census_year.id
-            )
+            cid = str(instance.community_id)
+            cyid = instance.census_year_id
+
+            def _enqueue():
+                calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+
+            transaction.on_commit(_enqueue)
     except Exception as e:
         logger.error(
             f"Error triggering compliance recalculation for site {instance.site.site_name}: {str(e)}"
@@ -198,17 +207,21 @@ def recalculate_compliance_on_site_delete(sender, instance, **kwargs):
     Recalculate compliance when site data is deleted.
     """
     try:
+        if not instance.community_id or not instance.census_year_id:
+            return
         logger.info(
             f"Site data deleted for site '{instance.site.site_name}' in community "
             f"'{instance.community.name}' for year {instance.census_year.year}. "
             f"Triggering compliance recalculation."
         )
 
-        # Trigger compliance recalculation for the affected community
-        calculate_community_compliance.delay(
-            community_id=str(instance.community.id),
-            census_year_id=instance.census_year.id
-        )
+        cid = str(instance.community_id)
+        cyid = instance.census_year_id
+
+        def _enqueue():
+            calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+
+        transaction.on_commit(_enqueue)
     except Exception as e:
         logger.error(f"Error triggering compliance recalculation for site deletion: {str(e)}")
 

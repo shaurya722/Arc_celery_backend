@@ -169,14 +169,9 @@ def calculate_required_sites(
 def count_actual_sites(community: Community, program: str, census_year: Optional[CensusYear] = None) -> int:
     """
     Count actual active sites for a community and program in a specific census year.
-    
-    Args:
-        community: Community instance
-        program: Program name (Paint, Lighting, Solvents, Pesticides, Fertilizers)
-        census_year: CensusYear instance (defaults to latest census year for community)
-    
-    Returns:
-        Number of active sites
+
+    SiteCensusData.community is always kept in sync with reallocations (reallocate()
+    moves the FK, undo reverts it), so a simple filter is the source of truth.
     """
     program_field_map = {
         'Paint': 'program_paint',
@@ -185,32 +180,29 @@ def count_actual_sites(community: Community, program: str, census_year: Optional
         'Pesticides': 'program_pesticides',
         'Fertilizers': 'program_fertilizers',
     }
-    
+
     program_field = program_field_map.get(program)
     if not program_field:
         return 0
-    
+
     if census_year is None:
-        # Get the latest census year for this community
         latest_census_data = community.census_data.order_by('-census_year__year').first()
         if latest_census_data:
             census_year = latest_census_data.census_year
         else:
             return 0
-    
-    # Count active sites with the program enabled that are associated with this community in this census year
+
     queryset = SiteCensusData.objects.filter(
         community=community,
         census_year=census_year,
         is_active=True,
         **{program_field: True}
     )
-    
-    # For Event sites, also require approval
+
     queryset = queryset.filter(
         ~Q(site_type='Event') | Q(event_approved=True)
     )
-    
+
     return queryset.count()
 
 
@@ -318,16 +310,27 @@ def calculate_compliance(
             return zero_metrics  # No census data - return zeros
     
     # Check if community is active in this census year (Community Census Data is_active)
+    has_census_data = False
     try:
         community_census = CommunityCensusData.objects.get(
             community=community,
             census_year=census_year
         )
         if not community_census.is_active:
-            # Community not active - return zero metrics
             return zero_metrics
+        has_census_data = True
     except CommunityCensusData.DoesNotExist:
-        # No census data for community - return zero metrics
+        has_census_data = False
+
+    # Even without CommunityCensusData, count sites that are linked to this community
+    # (they may have been imported / created directly on SiteCensusData.community)
+    site_count = SiteCensusData.objects.filter(
+        community=community,
+        census_year=census_year,
+        is_active=True,
+    ).count()
+
+    if not has_census_data and site_count == 0:
         return zero_metrics
     
     # Check if there are any active regulatory rules for this program in this census year
