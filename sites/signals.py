@@ -1,93 +1,71 @@
-from typing import Optional
+"""
+Site-related Django signals.
 
-from django.db.models.signals import post_delete, post_save, pre_save
+Compliance recalculation for ``SiteCensusData`` is handled in
+``complaince.signals`` (avoids duplicate Celery jobs and wrong task args).
+
+Do not use ``Site.community_id`` — ``Site`` has no community FK; community
+lives on ``SiteCensusData``.
+"""
+
+from django.db.models.signals import post_delete
 from django.dispatch import receiver
 
-from .models import Site, SiteCensusData
+from .models import SiteCensusData, SiteReallocation
 
 
-def _trigger_recalculation(community_id: Optional[str], program: str = None, census_year_id: Optional[str] = None):
-    if not community_id:
+@receiver(post_delete, sender=SiteReallocation)
+def sync_site_community_after_reallocation_delete(sender, instance, **kwargs):
+    """
+    If a SiteReallocation row is removed (admin delete, raw SQL, etc.), move
+    SiteCensusData.community back to the logical home so inbound caps and listings
+    stay consistent. Matches SiteReallocationService.undo_reallocation behaviour.
+    """
+    try:
+        sc = SiteCensusData.objects.get(pk=instance.site_census_data_id)
+    except SiteCensusData.DoesNotExist:
         return
 
-    from complaince.tasks import calculate_community_compliance
+    prev = sc.reallocations.order_by('-reallocated_at').first()
+    revert_to = prev.to_community if prev else instance.from_community
+    if sc.community_id != revert_to.id:
+        sc.community = revert_to
+        sc.save(update_fields=['community'])
 
-    if program and census_year_id:
-        calculate_community_compliance.delay(str(community_id), program, str(census_year_id))
-    else:
-        # If no specific program/year, trigger for all programs and latest year
-        # But for now, since it's not specific, perhaps skip or trigger for common programs
-        pass
-
-
-# @receiver(pre_save, sender=Site)
-# def store_previous_state(sender, instance, **kwargs):
-#     """Capture the previous community id and is_active for comparison after save."""
-#     if not instance.pk:
-#         instance._old_community_id = None
-#         instance._old_is_active = None
-#         return
-
-#     try:
-#         old_instance = Site.objects.get(pk=instance.pk)
-#         instance._old_community_id = old_instance.community_id
-#         instance._old_is_active = old_instance.is_active
-#     except Site.DoesNotExist:
-#         instance._old_community_id = None
-#         instance._old_is_active = None
+    _refresh_compliance_after_reallocation_change(sc, instance.from_community_id, instance.to_community_id)
 
 
-# @receiver(post_save, sender=Site)
-# def trigger_compliance_on_save(sender, instance, created, **kwargs):
-#     """Recalculate compliance when a site is created or updated."""
-#     community_ids = set()
+def _refresh_compliance_after_reallocation_change(site_census_data, from_community_id, to_community_id):
+    """Persist ComplianceCalculation for communities affected by a reallocation change."""
+    from community.models import Community
+    from complaince.models import ComplianceCalculation
+    from complaince.utils import calculate_compliance
+    from sites.adjacent_reallocation import PROGRAM_FIELD
 
-#     old_community_id = getattr(instance, "_old_community_id", None)
-#     old_is_active = getattr(instance, "_old_is_active", None)
+    cy = site_census_data.census_year
+    programs = [p for p, f in PROGRAM_FIELD.items() if getattr(site_census_data, f, False)]
+    if not programs:
+        programs = list(PROGRAM_FIELD.keys())
 
-#     # Trigger if community changed
-#     if old_community_id:
-#         community_ids.add(old_community_id)
-#     if instance.community_id:
-#         community_ids.add(instance.community_id)
-
-#     # Trigger if is_active changed and site has community
-#     if old_is_active is not None and old_is_active != instance.is_active and instance.community_id:
-#         community_ids.add(instance.community_id)
-
-#     for community_id in community_ids:
-#         _trigger_recalculation(community_id)
-
-
-@receiver(post_delete, sender=Site)
-def trigger_compliance_on_delete(sender, instance, **kwargs):
-    """Recalculate compliance when a site is deleted."""
-    if instance.community_id:
-        _trigger_recalculation(instance.community_id)
-
-
-@receiver(post_save, sender=SiteCensusData)
-@receiver(post_delete, sender=SiteCensusData)
-def recalculate_compliance_on_site_census_change(sender, instance, **kwargs):
-    """
-    Recalculate compliance for the community and census year when site census data changes.
-    Triggers calculation for each program the site participates in.
-    """
-    community = instance.community
-    census_year = instance.census_year
-    
-    if not community or not census_year:
-        return
-    
-    # Map program fields to program names (capitalize first letter to match compliance)
-    program_map = {
-        'program_paint': 'Paint',
-        'program_lights': 'Lighting',
-        'program_solvents': 'Solvents',
-        'program_pesticides': 'Pesticides',
-        'program_fertilizers': 'Fertilizers'
-    }
-    
-    for program_field, program_name in program_map.items():
-        if getattr(instance, program_field, False):
-            _trigger_recalculation(str(community.id), program_name, str(census_year.id))
+    for cid in {from_community_id, to_community_id}:
+        if not cid:
+            continue
+        try:
+            community = Community.objects.get(pk=cid)
+        except Community.DoesNotExist:
+            continue
+        for program in programs:
+            metrics = calculate_compliance(community, program, cy)
+            ComplianceCalculation.objects.update_or_create(
+                community=community,
+                program=program,
+                census_year=cy,
+                defaults={
+                    'required_sites': metrics['required_sites'],
+                    'actual_sites': metrics['actual_sites'],
+                    'shortfall': metrics['shortfall'],
+                    'excess': metrics['excess'],
+                    'compliance_rate': metrics['compliance_rate'],
+                    'created_by': None,
+                },
+            )

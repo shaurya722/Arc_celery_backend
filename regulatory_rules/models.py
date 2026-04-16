@@ -69,7 +69,7 @@ class RegulatoryRuleCensusData(models.Model):
     # Site Calculation
     min_population = models.IntegerField(null=True, blank=True)
     max_population = models.IntegerField(null=True, blank=True)
-    site_per_population = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    site_per_population = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     base_required_sites = models.IntegerField(null=True, blank=True)
     description = models.TextField(null=True, blank=True)
     

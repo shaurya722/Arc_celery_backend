@@ -6,7 +6,7 @@ This guide covers starting the Arc Backend application in both **Development** a
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.11+
 - PostgreSQL database
 - Redis server
 - Virtual environment activated

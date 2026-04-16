@@ -26,7 +26,7 @@ def calculate_all_compliance(self, census_year_id: int = None):
         local_now = timezone.localtime(now)
         now_str = local_now.strftime('%Y-%m-%d %H:%M:%S %Z')
         
-        programs = ['Paint', 'Lighting', 'Solvents', 'Pesticides']
+        programs = ['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers']
         
         # Get census year
         if census_year_id:
@@ -42,20 +42,34 @@ def calculate_all_compliance(self, census_year_id: int = None):
                 logger.error("No census year found")
                 return
         
-        # Get all active communities in this census year
-        active_census_data = CommunityCensusData.objects.filter(
-            census_year=census_year,
-            is_active=True
-        ).select_related('community')
-        
+        from sites.models import SiteCensusData
+
+        # Communities with active census data for this year
+        community_ids_census = set(
+            CommunityCensusData.objects.filter(
+                census_year=census_year,
+                is_active=True,
+            ).values_list('community_id', flat=True)
+        )
+
+        # Communities that have sites in this census year (may lack CommunityCensusData)
+        community_ids_sites = set(
+            SiteCensusData.objects.filter(
+                census_year=census_year,
+                is_active=True,
+            ).exclude(community__isnull=True).values_list('community_id', flat=True)
+        )
+
+        all_community_ids = community_ids_census | community_ids_sites
+        communities = Community.objects.filter(id__in=all_community_ids).order_by('name')
+
         total_calculations = 0
-        total_communities = active_census_data.count()
-        
+        total_communities = communities.count()
+
         logger.info(f"Starting compliance calculations for {total_communities} communities in year {census_year.year} at {now_str}")
-        
+
         with transaction.atomic():
-            for census_data in active_census_data:
-                community = census_data.community
+            for community in communities:
                 for program in programs:
                     # Calculate compliance metrics (returns zeros if inactive)
                     metrics = calculate_compliance(community, program, census_year)
@@ -134,7 +148,9 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
                 logger.error(f"No census data found for community {community_id}")
                 return []
         
-        # Check if community is active in this census year (only skip if explicitly inactive)
+        from sites.models import SiteCensusData
+
+        # Check if community is active in this census year
         try:
             community_census = CommunityCensusData.objects.get(
                 community=community,
@@ -144,10 +160,16 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
                 logger.info(f"Community {community.name} is not active in year {census_year.year}. Skipping compliance calculation.")
                 return []
         except CommunityCensusData.DoesNotExist:
-            # No explicit census data - proceed with calculation based on site data
-            logger.info(f"No explicit census data for community {community.name} in year {census_year.year}. Proceeding with site-based calculation.")
+            has_sites = SiteCensusData.objects.filter(
+                community=community, census_year=census_year, is_active=True
+            ).exists()
+            if has_sites:
+                logger.info(f"No CommunityCensusData for {community.name} in year {census_year.year}, but sites exist. Proceeding.")
+            else:
+                logger.info(f"No census data and no sites for {community.name} in year {census_year.year}. Skipping.")
+                return []
         
-        programs = [program] if program else ['Paint', 'Lighting', 'Solvents', 'Pesticides']
+        programs = [program] if program else ['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers']
         
         results = []
         

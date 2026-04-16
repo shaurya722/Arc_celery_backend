@@ -9,7 +9,6 @@ from .serializers import CommunitySerializer, CommunityCensusDataSerializer, Cen
 from .geo_utils import extract_geojson_geometry, normalize_polygon_geojson
 from .spatial_sql import community_ids_touching_polygon
 from .map_serializers import CommunityMapListSerializer
-from complaince.tasks import calculate_community_compliance
 
 
 class CommunityPagination(PageNumberPagination):
@@ -68,7 +67,6 @@ class CommunityListCreate(APIView):
         serializer = CommunityCensusDataSerializer(data=request.data)
         if serializer.is_valid():
             census_data = serializer.save()
-            calculate_community_compliance.delay(str(census_data.community.id))
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -172,8 +170,6 @@ class CommunityCensusDataListCreate(APIView):
         serializer = CommunityCensusDataSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
-            # Trigger compliance calculation for the community
-            calculate_community_compliance.delay(str(census_data.community.id))
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -203,7 +199,6 @@ class CommunityDetail(APIView):
         serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
-            calculate_community_compliance.delay(str(census_data.community.id))
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -241,8 +236,6 @@ class CommunityCensusDataDetail(APIView):
         serializer = CommunityCensusDataSerializer(census_data, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             census_data = serializer.save()
-            # Trigger compliance calculation
-            calculate_community_compliance.delay(str(census_data.community.id))
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

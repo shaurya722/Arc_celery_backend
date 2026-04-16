@@ -205,9 +205,9 @@ class SiteCensusData(models.Model):
 
 class SiteReallocation(models.Model):
     """
-    Tracks site reallocation history from one community to another.
-    This preserves full audit trail and allows undo/rollback.
-    NEVER directly modify SiteCensusData.community - always create a reallocation record.
+    Tracks adjacent reallocation history from one community to another.
+    SiteReallocationService creates these records and keeps SiteCensusData.community
+    in sync with the latest allocation for compliance and listings.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -247,6 +247,8 @@ class SiteReallocation(models.Model):
     reason = models.TextField(blank=True, null=True, help_text="Reason for reallocation")
     
     class Meta:
+        verbose_name = 'Adjacent site allocation'
+        verbose_name_plural = 'Adjacent site allocations'
         ordering = ['-reallocated_at']
         indexes = [
             models.Index(fields=['site_census_data', '-reallocated_at']),

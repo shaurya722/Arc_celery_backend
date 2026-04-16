@@ -37,7 +37,10 @@ class SiteReallocationService:
             reallocation_cap_status,
         )
 
-        from_community = site_census_data.effective_community
+        # Source community = current FK on the row (kept in sync with allocations).
+        # Do not use effective_community here: it follows realloc rows and can disagree
+        # after a manual DB delete; history still stores from_community / to_community.
+        from_community = site_census_data.community
         census_year = site_census_data.census_year
 
         # Validation 1: Check if site can be reallocated
@@ -117,7 +120,7 @@ class SiteReallocationService:
                 f"Cannot reallocate inactive site '{site_census_data.site.site_name}'"
             )
         
-        # Create reallocation record (preserves history)
+        # Create reallocation record AND move the site to the target community
         with transaction.atomic():
             reallocation = SiteReallocation.objects.create(
                 site_census_data=site_census_data,
@@ -127,18 +130,12 @@ class SiteReallocationService:
                 created_by=user,
                 reason=reason
             )
-            
-            # Trigger async recalculation for both communities
-            from complaince.tasks import calculate_community_compliance
-            calculate_community_compliance.delay(
-                str(from_community.id), 
-                census_year_id=site_census_data.census_year.id
-            )
-            calculate_community_compliance.delay(
-                str(to_community.id), 
-                census_year_id=site_census_data.census_year.id
-            )
-        
+
+            # Actually update the site's community so every part of the system
+            # (compliance, site listings, etc.) reflects the move immediately.
+            site_census_data.community = to_community
+            site_census_data.save(update_fields=['community'])
+
         return reallocation
     
     @staticmethod
@@ -166,23 +163,19 @@ class SiteReallocationService:
         
         with transaction.atomic():
             reallocation.delete()
-            
-            # Trigger recalculation for both communities
-            from complaince.tasks import calculate_community_compliance
-            calculate_community_compliance.delay(
-                str(from_community.id), 
-                census_year_id=census_year.id
-            )
-            calculate_community_compliance.delay(
-                str(to_community.id), 
-                census_year_id=census_year.id
-            )
-        
+
+            # Revert site to original source community (or the previous reallocation target
+            # if there are older reallocation records).
+            prev = site_census_data.reallocations.order_by('-reallocated_at').first()
+            revert_to = prev.to_community if prev else from_community
+            site_census_data.community = revert_to
+            site_census_data.save(update_fields=['community'])
+
         return {
             'message': 'Reallocation undone successfully',
             'site': site_census_data.site.site_name,
             'reverted_from': to_community.name,
-            'reverted_to': from_community.name
+            'reverted_to': revert_to.name,
         }
     
     @staticmethod
