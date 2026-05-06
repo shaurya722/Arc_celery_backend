@@ -9,40 +9,63 @@ class RegulatoryRuleSerializer(serializers.ModelSerializer):
 
 
 class RegulatoryRuleCensusDataSerializer(serializers.ModelSerializer):
-    # Include related fields for display
+    # Shown in API; lives on RegulatoryRule, not on RegulatoryRuleCensusData
     name = serializers.CharField(source='regulatory_rule.name', read_only=True)
-    description = serializers.CharField(source='regulatory_rule.description', read_only=True)
+    # Census-year row has its own description (RegulatoryRule has no description field)
     year = serializers.IntegerField(source='census_year.year', read_only=True)
-    
+
     class Meta:
         model = RegulatoryRuleCensusData
         fields = [
             'id', 'regulatory_rule', 'census_year', 'name', 'description', 'year',
-            'program', 'category', 'rule_type', 'min_population', 'max_population', 
-            'base_required_sites', 'is_active', 'start_date', 'end_date', 
-            'created_at', 'updated_at'
+            'program', 'category', 'rule_type', 'min_population', 'max_population',
+            'site_per_population', 'base_required_sites', 'event_offset_percentage',
+            'reallocation_percentage', 'is_active', 'start_date', 'end_date',
+            'created_at', 'updated_at',
         ]
-        read_only_fields = ['name', 'description', 'year']
+        read_only_fields = ['name', 'year']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # For POST/PUT requests, make regulatory_rule and census_year accept names/values instead of IDs
         if self.context.get('request') and self.context['request'].method in ['POST', 'PUT', 'PATCH']:
-            # Change field types for input
             self.fields['regulatory_rule'] = serializers.CharField()
-            # Make name writable for updates
-            self.fields['name'] = serializers.CharField(required=False)
             self.fields['census_year'] = serializers.IntegerField()
+            # Optional alias for clients that send name alongside regulatory_rule (not a model field)
+            self.fields['name'] = serializers.CharField(required=False, write_only=True)
 
     def validate_name(self, value):
-        """Validate and update regulatory rule name for updates"""
+        """On PATCH/PUT, optional body name updates the linked RegulatoryRule."""
         if self.instance and isinstance(value, str):
-            # For updates, update the regulatory rule name
             regulatory_rule = self.instance.regulatory_rule
             regulatory_rule.name = value
-            regulatory_rule.save()
+            regulatory_rule.save(update_fields=['name'])
             return value
         return value
+
+    def create(self, validated_data):
+        # `name` is write-only for clients; it is not a column on RegulatoryRuleCensusData
+        validated_data.pop('name', None)
+
+        regulatory_rule = validated_data.get('regulatory_rule')
+        census_year = validated_data.get('census_year')
+        if not regulatory_rule or not census_year:
+            return super().create(validated_data)
+
+        defaults = dict(validated_data)
+        defaults.pop('regulatory_rule', None)
+        defaults.pop('census_year', None)
+
+        obj, _created = RegulatoryRuleCensusData.objects.update_or_create(
+            regulatory_rule=regulatory_rule,
+            census_year=census_year,
+            defaults=defaults,
+        )
+        return obj
+
+    def update(self, instance, validated_data):
+        validated_data.pop('name', None)
+        return super().update(instance, validated_data)
 
     def validate_regulatory_rule(self, value):
         """Validate and lookup regulatory rule by ID or name"""

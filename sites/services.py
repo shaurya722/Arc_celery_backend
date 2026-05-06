@@ -4,10 +4,29 @@ DO NOT use signals for this - use explicit service methods.
 """
 from collections import defaultdict
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.core.exceptions import ValidationError
 from .models import SiteCensusData, SiteReallocation
 from community.models import Community, AdjacentCommunity
+
+
+def compliance_calc_snapshot(calc):
+    """Serialize ComplianceCalculation for API validation responses."""
+    if calc is None:
+        return None
+    return {
+        'community_id': str(calc.community_id),
+        'community_name': calc.community.name,
+        'program': calc.program,
+        'required_sites': calc.required_sites,
+        'actual_sites': calc.actual_sites,
+        'shortfall': calc.shortfall,
+        'excess': calc.excess,
+        'compliance_rate': float(calc.compliance_rate or 0),
+        'sites_from_adjacent': getattr(calc, 'sites_from_adjacent', 0) or 0,
+        'sites_from_requirements': getattr(calc, 'sites_from_requirements', 0) or 0,
+        'sites_from_events': getattr(calc, 'sites_from_events', 0) or 0,
+    }
 
 
 class SiteReallocationService:
@@ -21,12 +40,15 @@ class SiteReallocationService:
         """
         Reallocate a site from its current effective community to an adjacent community.
 
-        Adjacency: map-drawn Community.adjacent and/or legacy AdjacentCommunity (either direction)
-        for the site census year.
+        Adjacency: map ``Community.adjacent`` when that community has map neighbors; otherwise
+        legacy AdjacentCommunity (either direction) for the site census year.
 
         Rules: source must have program excess; target must have program shortfall; inbound
-        reallocations to target for that program must be under floor(required × cap% / 100)
-        (cap from RegulatoryRuleCensusData Reallocation rule, else 35%).
+        reallocations to target for that program must be under ceil(required × cap% / 100)
+        (cap from RegulatoryRuleCensusData Reallocation rule, else 10%).
+
+        Uses ``select_for_update`` on the site census row to prevent concurrent double inserts.
+        Enforces one allocation row per (site, census year, from, to) at DB level.
         """
         from complaince.models import ComplianceCalculation
 
@@ -37,104 +59,217 @@ class SiteReallocationService:
             reallocation_cap_status,
         )
 
-        # Source community = current FK on the row (kept in sync with allocations).
-        # Do not use effective_community here: it follows realloc rows and can disagree
-        # after a manual DB delete; history still stores from_community / to_community.
-        from_community = site_census_data.community
-        census_year = site_census_data.census_year
+        def _params(src, tgt):
+            return {
+                'source_compliance': compliance_calc_snapshot(src),
+                'destination_compliance': compliance_calc_snapshot(tgt),
+                'reallocation_cap_hint': None,
+            }
 
-        # Validation 1: Check if site can be reallocated
-        if not site_census_data.is_reallocatable:
-            raise ValidationError(
-                f"Site '{site_census_data.site.site_name}' cannot be reallocated. "
-                f"Site type: {site_census_data.site_type}, "
-                f"Operator type: {site_census_data.operator_type}"
-            )
+        site_pk = site_census_data.pk
 
-        # Validation 2: Check if from and to communities are the same
-        if from_community == to_community:
-            raise ValidationError(
-                f"Cannot reallocate to the same community: {from_community.name}"
-            )
-
-        resolved_program = program or infer_program_from_site(site_census_data)
-        if not resolved_program:
-            raise ValidationError(
-                'Could not infer program from site flags; pass program (Paint, Lighting, '
-                'Solvents, Pesticides, or Fertilizers).'
-            )
-        if resolved_program not in PROGRAM_FIELD:
-            raise ValidationError(f'Invalid program: {resolved_program}')
-
-        field = PROGRAM_FIELD[resolved_program]
-        if not getattr(site_census_data, field, False):
-            raise ValidationError(
-                f"Site '{site_census_data.site.site_name}' does not participate in "
-                f"{resolved_program}; cannot reallocate under that program."
-            )
-
-        # Validation 3: Adjacency (map boundary + legacy AdjacentCommunity)
-        if not is_adjacent_for_reallocation(from_community, to_community, census_year):
-            raise ValidationError(
-                f"'{to_community.name}' is not adjacent to '{from_community.name}' for census year "
-                f"{census_year.year} (map adjacency or adjacent-community record)."
-            )
-
-        # Validation 4: Source excess / target shortfall / regulatory cap
-        src_calc = ComplianceCalculation.objects.filter(
-            community=from_community,
-            census_year=census_year,
-            program=resolved_program,
-        ).first()
-        if not src_calc or (src_calc.excess or 0) < 1:
-            raise ValidationError(
-                f"Source community '{from_community.name}' has no excess for {resolved_program} "
-                f"in census year {census_year.year}."
-            )
-
-        tgt_calc = ComplianceCalculation.objects.filter(
-            community=to_community,
-            census_year=census_year,
-            program=resolved_program,
-        ).first()
-        if not tgt_calc or (tgt_calc.shortfall or 0) < 1:
-            raise ValidationError(
-                f"Target community '{to_community.name}' has no shortfall for {resolved_program} "
-                f"in census year {census_year.year}."
-            )
-
-        cap = reallocation_cap_status(
-            to_community, census_year, resolved_program, tgt_calc.required_sites or 0
-        )
-        if cap['inbound_reallocations_remaining'] < 1:
-            raise ValidationError(
-                f"Inbound reallocation cap reached for '{to_community.name}' ({resolved_program}): "
-                f"max {cap['max_inbound_reallocations']} sites "
-                f"({cap['regulatory_reallocation_percentage']}% of "
-                f"{tgt_calc.required_sites} required), {cap['inbound_reallocations_used']} used."
-            )
-
-        # Validation 5: Check if site is active
-        if not site_census_data.is_active:
-            raise ValidationError(
-                f"Cannot reallocate inactive site '{site_census_data.site.site_name}'"
-            )
-        
-        # Create reallocation record AND move the site to the target community
         with transaction.atomic():
-            reallocation = SiteReallocation.objects.create(
-                site_census_data=site_census_data,
-                from_community=from_community,
-                to_community=to_community,
-                census_year=site_census_data.census_year,
-                created_by=user,
-                reason=reason
+            # Lock only SiteCensusData rows — PostgreSQL rejects FOR UPDATE on the nullable
+            # side of a LEFT JOIN from ``select_related('community')`` (community FK is optional).
+            locked_sc = (
+                SiteCensusData.objects.select_for_update(of=('self',))
+                .select_related('site', 'census_year')
+                .get(pk=site_pk)
             )
 
-            # Actually update the site's community so every part of the system
-            # (compliance, site listings, etc.) reflects the move immediately.
-            site_census_data.community = to_community
-            site_census_data.save(update_fields=['community'])
+            from_community = locked_sc.community
+            census_year = locked_sc.census_year
+
+            if not from_community:
+                raise ValidationError(
+                    'Site census row has no community set; assign a community before reallocating.'
+                )
+
+            # Validation 1: Check if site can be reallocated
+            if not locked_sc.is_reallocatable:
+                raise ValidationError(
+                    f"Site '{locked_sc.site.site_name}' cannot be reallocated. "
+                    f"Site type: {locked_sc.site_type}, "
+                    f"Operator type: {locked_sc.operator_type}"
+                )
+
+            # Validation 2: Check if from and to communities are the same
+            if from_community == to_community:
+                raise ValidationError(
+                    f"Cannot reallocate to the same community: {from_community.name}"
+                )
+
+            resolved_program = program or infer_program_from_site(locked_sc)
+            if not resolved_program:
+                raise ValidationError(
+                    'Could not infer program from site flags; pass program (Paint, Lighting, '
+                    'Solvents, Pesticides, or Fertilizers).'
+                )
+            if resolved_program not in PROGRAM_FIELD:
+                raise ValidationError(f'Invalid program: {resolved_program}')
+
+            field = PROGRAM_FIELD[resolved_program]
+            if not getattr(locked_sc, field, False):
+                raise ValidationError(
+                    f"Site '{locked_sc.site.site_name}' does not participate in "
+                    f"{resolved_program}; cannot reallocate under that program."
+                )
+
+            # Validation 3: Adjacency
+            if not is_adjacent_for_reallocation(from_community, to_community, census_year, resolved_program):
+                raise ValidationError(
+                    f"'{to_community.name}' is not adjacent to '{from_community.name}' for census year "
+                    f"{census_year.year} (program rules: adjacency or same region for HSP)."
+                )
+
+            src_calc = ComplianceCalculation.objects.filter(
+                community=from_community,
+                census_year=census_year,
+                program=resolved_program,
+            ).first()
+            tgt_calc = ComplianceCalculation.objects.filter(
+                community=to_community,
+                census_year=census_year,
+                program=resolved_program,
+            ).first()
+
+            # Validation 4: Source excess / target shortfall
+            if not src_calc or (src_calc.excess or 0) < 1:
+                raise ValidationError(
+                    (
+                        f"Source community '{from_community.name}' has no excess for {resolved_program} "
+                        f'in census year {census_year.year}.'
+                    ),
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            if not tgt_calc or (tgt_calc.shortfall or 0) < 1:
+                raise ValidationError(
+                    (
+                        f"Target community '{to_community.name}' has no shortfall for {resolved_program} "
+                        f'in census year {census_year.year}.'
+                    ),
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            program_filter = {f'site_census_data__{field}': True}
+
+            outbound_count = SiteReallocation.objects.filter(
+                from_community=from_community,
+                census_year=census_year,
+                **program_filter,
+            ).count()
+            src_excess = src_calc.excess or 0
+            if src_excess >= 1 and outbound_count >= src_excess:
+                raise ValidationError(
+                    (
+                        f"Source '{from_community.name}' excess for {resolved_program} is {src_excess}; "
+                        f'{outbound_count} outbound adjacent allocation(s) already recorded — cannot allocate another.'
+                    ),
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            inbound_count = SiteReallocation.objects.filter(
+                to_community=to_community,
+                census_year=census_year,
+                **program_filter,
+            ).count()
+            tgt_shortfall = tgt_calc.shortfall or 0
+            if tgt_shortfall >= 1 and inbound_count >= tgt_shortfall:
+                raise ValidationError(
+                    (
+                        f"Destination '{to_community.name}' shortfall for {resolved_program} is {tgt_shortfall}; "
+                        f'{inbound_count} inbound adjacent allocation(s) already fill that gap.'
+                    ),
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            cap = reallocation_cap_status(
+                to_community, census_year, resolved_program, tgt_calc.required_sites or 0
+            )
+            if cap['inbound_reallocations_remaining'] < 1:
+                p = _params(src_calc, tgt_calc)
+                p['reallocation_cap_hint'] = cap
+                raise ValidationError(
+                    (
+                        f"Inbound reallocation cap reached for '{to_community.name}' ({resolved_program}): "
+                        f"max {cap['max_inbound_reallocations']} sites "
+                        f"({cap['regulatory_reallocation_percentage']}% of "
+                        f'{tgt_calc.required_sites} required), {cap["inbound_reallocations_used"]} used.'
+                    ),
+                    params=p,
+                )
+
+            if not locked_sc.is_active:
+                raise ValidationError(
+                    f"Cannot reallocate inactive site '{locked_sc.site.site_name}'",
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            dup_q = SiteReallocation.objects.filter(
+                site_census_data_id=locked_sc.pk,
+                census_year_id=census_year.pk,
+                from_community_id=from_community.pk,
+                to_community_id=to_community.pk,
+            )
+            if dup_q.exists():
+                raise ValidationError(
+                    (
+                        'An identical adjacent allocation already exists for this site, census year, '
+                        f'and route ({from_community.name} → {to_community.name}).'
+                    ),
+                    params=_params(src_calc, tgt_calc),
+                )
+
+            try:
+                reallocation = SiteReallocation.objects.create(
+                    site_census_data=locked_sc,
+                    from_community=from_community,
+                    to_community=to_community,
+                    census_year=census_year,
+                    created_by=user,
+                    reason=reason,
+                )
+            except IntegrityError:
+                raise ValidationError(
+                    'Duplicate adjacent allocation was rejected (database constraint). '
+                    'Refresh allocation lists and try again.',
+                    params=_params(src_calc, tgt_calc),
+                ) from None
+
+            locked_sc.community = to_community
+            locked_sc.save(update_fields=['community'])
+
+        # Recompute compliance immediately so UI reflects "sites_from_adjacent".
+        try:
+            from complaince.utils import calculate_compliance
+            from complaince.models import ComplianceCalculation
+
+            for comm in (from_community, to_community):
+                metrics = calculate_compliance(comm, resolved_program, census_year)
+                ComplianceCalculation.objects.update_or_create(
+                    community=comm,
+                    program=resolved_program,
+                    census_year=census_year,
+                    defaults={
+                        'base_required_sites': metrics.get('base_required_sites', 0) or 0,
+                        'sites_from_requirements': metrics.get('sites_from_requirements', 0) or 0,
+                        'sites_from_adjacent': metrics.get('sites_from_adjacent', 0) or 0,
+                        'sites_from_events': metrics.get('sites_from_events', 0) or 0,
+                        'net_direct_service_offset': metrics.get('net_direct_service_offset', 0) or 0,
+                        'direct_service_offset_percentage': metrics.get('direct_service_offset_percentage'),
+                        'direct_service_offset_source': metrics.get('direct_service_offset_source', '') or '',
+                        'required_sites': metrics['required_sites'],
+                        'actual_sites': metrics['actual_sites'],
+                        'shortfall': metrics['shortfall'],
+                        'excess': metrics['excess'],
+                        'compliance_rate': metrics['compliance_rate'],
+                        'created_by': None,
+                    },
+                )
+        except Exception:
+            # Best-effort; periodic tasks can still rebuild compliance.
+            pass
 
         return reallocation
     
@@ -170,6 +305,39 @@ class SiteReallocationService:
             revert_to = prev.to_community if prev else from_community
             site_census_data.community = revert_to
             site_census_data.save(update_fields=['community'])
+
+        # Recompute compliance immediately after undo.
+        try:
+            from complaince.utils import calculate_compliance
+            from complaince.models import ComplianceCalculation
+            from .adjacent_reallocation import infer_program_from_site
+            # affected: original from, undo target, and revert_to (could differ)
+            affected = {from_community, to_community, revert_to}
+            resolved_program = infer_program_from_site(site_census_data) or 'Paint'
+            for comm in affected:
+                metrics = calculate_compliance(comm, resolved_program, census_year)
+                ComplianceCalculation.objects.update_or_create(
+                    community=comm,
+                    program=resolved_program,
+                    census_year=census_year,
+                    defaults={
+                        'base_required_sites': metrics.get('base_required_sites', 0) or 0,
+                        'sites_from_requirements': metrics.get('sites_from_requirements', 0) or 0,
+                        'sites_from_adjacent': metrics.get('sites_from_adjacent', 0) or 0,
+                        'sites_from_events': metrics.get('sites_from_events', 0) or 0,
+                        'net_direct_service_offset': metrics.get('net_direct_service_offset', 0) or 0,
+                        'direct_service_offset_percentage': metrics.get('direct_service_offset_percentage'),
+                        'direct_service_offset_source': metrics.get('direct_service_offset_source', '') or '',
+                        'required_sites': metrics['required_sites'],
+                        'actual_sites': metrics['actual_sites'],
+                        'shortfall': metrics['shortfall'],
+                        'excess': metrics['excess'],
+                        'compliance_rate': metrics['compliance_rate'],
+                        'created_by': None,
+                    },
+                )
+        except Exception:
+            pass
 
         return {
             'message': 'Reallocation undone successfully',

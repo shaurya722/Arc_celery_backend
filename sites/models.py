@@ -1,15 +1,27 @@
-from django.db import models
 import uuid
+
+from django.db import models
 from django.utils import timezone
+
+
+def _default_site_id():
+    """String PK so ORM SQL params match ``varchar`` ``sites_site.id`` (see migration 0005)."""
+    return str(uuid.uuid4())
 
 
 class Site(models.Model):
     """
     Site - Static identity only.
-    Stores only the site name and basic unchanging information.
+    Primary key is a string (UUID hex by default) matching the database column type.
     All year-specific data is stored in SiteCensusData.
     """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.CharField(
+        max_length=100,
+        primary_key=True,
+        default=_default_site_id,
+        editable=True,
+        help_text='Business / API site identifier (e.g. import Site ID).',
+    )
     site_name = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -130,7 +142,6 @@ class SiteCensusData(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = ('site', 'census_year')
         verbose_name = "Site Census Data"
         verbose_name_plural = "Site Census Data"
         ordering = ['-census_year__year', 'site__site_name']
@@ -254,6 +265,12 @@ class SiteReallocation(models.Model):
             models.Index(fields=['site_census_data', '-reallocated_at']),
             models.Index(fields=['from_community', 'census_year']),
             models.Index(fields=['to_community', 'census_year']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['site_census_data', 'census_year', 'from_community', 'to_community'],
+                name='uniq_sitereallocation_site_year_route',
+            ),
         ]
     
     def __str__(self):

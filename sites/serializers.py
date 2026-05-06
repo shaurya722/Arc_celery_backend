@@ -118,50 +118,25 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
     
     def validate(self, data):
         """
-        Custom validation to handle unique_together constraint when updating.
-        Allows changing site and census_year if the combination doesn't already exist.
+        Resolve ``site`` from ``site_name`` when needed.
+        Multiple ``SiteCensusData`` rows may share the same ``site`` and ``census_year``; rows are distinct by ``id``.
         """
         instance = self.instance
-        
-        # Handle site_name - create or get site and set it in data
+
         site_name = data.pop('site_name', None)
         if site_name and not data.get('site'):
             if instance:
-                # For updates, find the existing site linked to this census data and update its name
                 site = instance.site
                 site.site_name = site_name
                 site.save()
                 data['site'] = site
             else:
-                # For creates, get or create the site
                 site, created = Site.objects.get_or_create(
                     site_name=site_name,
                     defaults={'site_name': site_name}
                 )
                 data['site'] = site
-        
-        # Get site and census_year from data (use existing values if not provided)
-        site = data.get('site', instance.site if instance else None)
-        census_year = data.get('census_year', instance.census_year if instance else None)
-        
-        # Check if this combination already exists (excluding the current instance)
-        if site and census_year:
-            existing = SiteCensusData.objects.filter(
-                site=site,
-                census_year=census_year
-            )
-            
-            # If updating, exclude the current instance from the check
-            if instance:
-                existing = existing.exclude(pk=instance.pk)
-            
-            if existing.exists():
-                raise serializers.ValidationError({
-                    'non_field_errors': [
-                        f'Site census data for {site.site_name} and year {census_year.year} already exists.'
-                    ]
-                })
-        
+
         return data
     
     def to_representation(self, instance):

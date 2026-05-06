@@ -9,6 +9,7 @@ from .views import (
     YearData,
     YearDropdown,
     CommunityDropdown,
+    CommunityModelDropdown,
     AdjacentCommunityReallocationListCreate,
     AdjacentCommunityReallocationDetail,
     MapDataView,
@@ -17,9 +18,15 @@ from .views import (
     CommunityMapBoundaryListCreate,
     CommunityMapBoundaryDetail,
     CommunityMapAvailableForAssignment,
+    CommunityBaseListCreate,
+    CommunityBaseDetail,
 )
 
 urlpatterns = [
+    # Community (base model) CRUD
+    path('base-communities/', CommunityBaseListCreate.as_view(), name='community-base-list-create'),
+    path('base-communities/<uuid:pk>/', CommunityBaseDetail.as_view(), name='community-base-detail'),
+
     # Community Census Data (Flat Format) CRUD
     path('communities/', CommunityListCreate.as_view(), name='community-list-create'),
     path('communities/<int:pk>/', CommunityDetail.as_view(), name='community-detail'),
@@ -39,6 +46,7 @@ urlpatterns = [
 
     # Community dropdown API
     path('communities/dropdown/', CommunityDropdown.as_view(), name='community-dropdown'),
+    path('communities/model-dropdown/', CommunityModelDropdown.as_view(), name='community-model-dropdown'),
     
     # Census Year CRUD
     path('census-years/', CensusYearListCreate.as_view(), name='census-year-list-create'),

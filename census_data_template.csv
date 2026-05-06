@@ -1,0 +1,11 @@
+community_name,year,population,tier,region,zone,province,is_active
+CITY OF BARRIE,2000,128430,Urban,Central,Simcoe,Ontario,true
+CITY OF BRAMPTON,2000,325428,Urban,Greater Toronto Area,Peel,Ontario,true
+CITY OF TORONTO,2000,2481494,Urban,Greater Toronto Area,Toronto,Ontario,true
+CITY OF MISSISSAUGA,2000,612925,Urban,Greater Toronto Area,Peel,Ontario,true
+CITY OF OTTAWA,2000,774072,Urban,Eastern,Ottawa,Ontario,true
+CITY OF HAMILTON,2000,490268,Urban,Central,Hamilton,Ontario,true
+CITY OF LONDON,2000,336539,Urban,Southwestern,Middlesex,Ontario,true
+CITY OF MARKHAM,2000,208615,Urban,Greater Toronto Area,York,Ontario,true
+CITY OF VAUGHAN,2000,132549,Urban,Greater Toronto Area,York,Ontario,true
+CITY OF KITCHENER,2000,190399,Urban,Southwestern,Waterloo,Ontario,true

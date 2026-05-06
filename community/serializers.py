@@ -206,6 +206,45 @@ class CommunitySerializer(serializers.ModelSerializer):
         return census_years_list
 
 
+class CommunityBaseSerializer(serializers.ModelSerializer):
+    """Basic serializer for CRUD on Community model (static identity only)."""
+    adjacent = serializers.SerializerMethodField()
+    adjacent_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False,
+        allow_empty=True,
+        help_text='List of adjacent community UUIDs to set on create/update.'
+    )
+
+    class Meta:
+        model = Community
+        fields = ['id', 'name', 'boundary', 'adjacent', 'adjacent_ids', 'created_at', 'updated_at']
+
+    def get_adjacent(self, obj):
+        return [
+            {
+                'id': str(comm.id),
+                'name': comm.name,
+            }
+            for comm in obj.adjacent.all()
+        ]
+
+    def create(self, validated_data):
+        adjacent_ids = validated_data.pop('adjacent_ids', [])
+        instance = super().create(validated_data)
+        if adjacent_ids:
+            instance.adjacent.set(adjacent_ids)
+        return instance
+
+    def update(self, instance, validated_data):
+        adjacent_ids = validated_data.pop('adjacent_ids', None)
+        instance = super().update(instance, validated_data)
+        if adjacent_ids is not None:
+            instance.adjacent.set(adjacent_ids)
+        return instance
+
+
 class CommunityCensusDataSerializer(serializers.ModelSerializer):
     """Serializer for year-specific community data"""
     community_name = serializers.CharField(source='community.name', read_only=True)
@@ -393,8 +432,8 @@ class MapDataSerializer(serializers.Serializer):
             try:
                 municipalities_page = int(parsed_filters['municipalities_page'])
                 municipalities_limit = int(parsed_filters['municipalities_limit'])
-                if municipalities_limit > 100:  # Max limit
-                    municipalities_limit = 100
+                if municipalities_limit > 2000:  # Max limit
+                    municipalities_limit = 2000
                 if municipalities_limit < 1:
                     municipalities_limit = 1
                 if municipalities_page < 1:
@@ -419,6 +458,7 @@ class MapDataSerializer(serializers.Serializer):
                 'name': community_data.community.name,
                 'tier': community_data.tier or 'Unknown',
                 'population': community_data.population or 0,
+                'boundary': community_data.community.boundary,
             })
 
         # Get sites for this census year
@@ -442,6 +482,12 @@ class MapDataSerializer(serializers.Serializer):
 
         if parsed_filters.get('municipalities'):
             sites_queryset = sites_queryset.filter(community__name__in=parsed_filters['municipalities'])
+
+        # Compute overall counts BEFORE applying status filter so the response
+        # always shows active / inactive / total regardless of the status param.
+        sites_count_active = sites_queryset.filter(is_active=True).count()
+        sites_count_inactive = sites_queryset.filter(is_active=False).count()
+        sites_count_total = sites_count_active + sites_count_inactive
 
         if parsed_filters.get('status'):
             status_filters = []
@@ -477,8 +523,8 @@ class MapDataSerializer(serializers.Serializer):
             try:
                 page = int(parsed_filters['page'])
                 limit = int(parsed_filters['limit'])
-                if limit > 100:  # Max limit
-                    limit = 100
+                if limit > 1000:  # Max limit
+                    limit = 1000
                 if limit < 1:
                     limit = 1
                 if page < 1:
@@ -490,7 +536,10 @@ class MapDataSerializer(serializers.Serializer):
                     'page': paginated_sites.number,
                     'limit': limit,
                     'total': paginator.count,
-                    'total_pages': paginator.num_pages
+                    'total_pages': paginator.num_pages,
+                    'total_active': sites_count_active,
+                    'total_inactive': sites_count_inactive,
+                    'total_overall': sites_count_total,
                 }
             except (PageNotAnInteger, EmptyPage, ValueError):
                 paginated_sites = sites_queryset

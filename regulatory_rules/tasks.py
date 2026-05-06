@@ -52,22 +52,22 @@ def check_expiry(self):
             site_census_count = expired_site_census.update(is_active=False)
         
         # Trigger compliance recalculation after transaction commit
-        from complaince.tasks import calculate_community_compliance
-        
+        from complaince.tasks import schedule_community_compliance_recalc
+
         # For expired community census data
         for _, community_name, census_year in community_census_ids:
             try:
                 community = Community.objects.get(name=community_name)
-                calculate_community_compliance.delay(str(community.id), census_year_id=census_year)
+                schedule_community_compliance_recalc(community.id, census_year)
             except Community.DoesNotExist:
                 logger.warning(f"Community '{community_name}' not found for compliance recalculation")
-        
+
         # For expired site census data
         for _, site_name, census_year in site_census_ids:
             try:
                 site = Site.objects.get(site_name=site_name)
                 if site.community_id:
-                    calculate_community_compliance.delay(str(site.community_id), census_year_id=census_year)
+                    schedule_community_compliance_recalc(site.community_id, census_year)
             except Site.DoesNotExist:
                 logger.warning(f"Site '{site_name}' not found for compliance recalculation")
         
@@ -112,7 +112,6 @@ def check_expiry(self):
                 program_updates[program_bool] = count
         
         # Trigger compliance recalculation for affected communities
-        from complaince.tasks import calculate_community_compliance
         for community_id in affected_communities:
             if community_id:
                 # Get latest census year for this community
@@ -120,7 +119,9 @@ def check_expiry(self):
                     community_id=community_id
                 ).order_by('-census_year__year').first()
                 if latest_census:
-                    calculate_community_compliance.delay(str(community_id), census_year_id=latest_census.census_year.id)
+                    schedule_community_compliance_recalc(
+                        community_id, latest_census.census_year.id
+                    )
         
         # Log changes
         now_str = now.strftime('%Y-%m-%d %H:%M:%S IST')

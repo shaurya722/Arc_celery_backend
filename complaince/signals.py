@@ -8,7 +8,8 @@ from django.dispatch import receiver
 from community.models import CommunityCensusData, CensusYear
 from sites.models import SiteCensusData
 from regulatory_rules.models import RegulatoryRuleCensusData
-from .tasks import calculate_community_compliance
+from .models import DirectServiceOffset, CommunityOffset
+from .tasks import schedule_community_compliance_recalc
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def recalculate_compliance_on_community_change(sender, instance, created, **kwar
             cyid = instance.census_year_id
 
             def _enqueue():
-                calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+                schedule_community_compliance_recalc(cid, cyid)
 
             transaction.on_commit(_enqueue)
         else:
@@ -84,7 +85,7 @@ def recalculate_compliance_on_site_change(sender, instance, created, **kwargs):
             cyid = instance.census_year_id
 
             def _enqueue():
-                calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+                schedule_community_compliance_recalc(cid, cyid)
 
             transaction.on_commit(_enqueue)
     except Exception as e:
@@ -131,9 +132,9 @@ def recalculate_compliance_on_rule_change(sender, instance, created, **kwargs):
                         f"Triggering compliance recalculation."
                     )
 
-                    calculate_community_compliance.delay(
-                        community_id=str(community_data.community.id),
-                        census_year_id=instance.census_year.id
+                    schedule_community_compliance_recalc(
+                        community_data.community.id,
+                        instance.census_year.id,
                     )
         else:
             # Rule is inactive - check if there are any other active rules for this program
@@ -174,10 +175,10 @@ def recalculate_compliance_on_rule_change(sender, instance, created, **kwargs):
                 ).select_related('community')
                 
                 for community_data in affected_communities:
-                    calculate_community_compliance.delay(
-                        community_id=str(community_data.community.id),
+                    schedule_community_compliance_recalc(
+                        community_data.community.id,
+                        instance.census_year.id,
                         program=instance.program,
-                        census_year_id=instance.census_year.id
                     )
     except Exception as e:
         logger.error(
@@ -219,7 +220,7 @@ def recalculate_compliance_on_site_delete(sender, instance, **kwargs):
         cyid = instance.census_year_id
 
         def _enqueue():
-            calculate_community_compliance.delay(community_id=cid, census_year_id=cyid)
+            schedule_community_compliance_recalc(cid, cyid)
 
         transaction.on_commit(_enqueue)
     except Exception as e:
@@ -245,9 +246,9 @@ def recalculate_compliance_on_rule_delete(sender, instance, **kwargs):
 
         # Trigger compliance recalculation for each affected community
         for community_data in affected_communities:
-            calculate_community_compliance.delay(
-                community_id=str(community_data.community.id),
-                census_year_id=instance.census_year.id
+            schedule_community_compliance_recalc(
+                community_data.community.id,
+                instance.census_year.id,
             )
     except Exception as e:
         logger.error(f"Error triggering compliance recalculation for rule deletion: {str(e)}")

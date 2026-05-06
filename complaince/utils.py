@@ -7,6 +7,7 @@ from django.db.models import Q
 from regulatory_rules.models import RegulatoryRule, RegulatoryRuleCensusData
 from community.models import Community, CommunityCensusData, CensusYear
 from sites.models import Site, SiteCensusData
+from .models import CommunityOffset, DirectServiceOffset
 
 
 def calculate_required_sites_from_rule(
@@ -166,9 +167,93 @@ def calculate_required_sites(
     return required
 
 
+def _get_direct_service_offset(community: Community, program: str, census_year: CensusYear) -> tuple[int, str]:
+    """
+    Returns (percentage, source) where source is 'community', 'global', or ''.
+    """
+    # Per-community override wins
+    co = (
+        CommunityOffset.objects.filter(
+            community=community,
+            census_year=census_year,
+            program=program,
+            is_active=True,
+        )
+        .order_by('-updated_at')
+        .first()
+    )
+    if co:
+        return int(co.percentage or 0), 'community'
+
+    g = (
+        DirectServiceOffset.objects.filter(
+            census_year=census_year,
+            program=program,
+            is_active=True,
+        )
+        .order_by('-updated_at')
+        .first()
+    )
+    if g:
+        return int(g.percentage or 0), 'global'
+
+    return 0, ''
+
+
+def apply_direct_service_offset(
+    base_required: int,
+    percentage: int,
+) -> int:
+    """
+    Tool A formula:
+    New Required = ceil(BaseRequired × (1 - percentage/100))
+    Minimum: 1 if BaseRequired > 0
+    """
+    if base_required <= 0:
+        return 0
+    percentage = max(0, min(100, int(percentage or 0)))
+    new_required = int(math.ceil(base_required * (1 - (percentage / 100.0))))
+    return max(1, new_required)
+
+
+def calculate_required_sites_with_offset(
+    community: Community,
+    program: str,
+    census_year: Optional[CensusYear] = None,
+) -> dict:
+    """
+    Returns required-site calculation details:
+    - base_required_sites
+    - direct_service_offset_percentage
+    - direct_service_offset_source
+    - required_sites (after offset)
+    """
+    if census_year is None:
+        latest_census_data = community.census_data.order_by('-census_year__year').first()
+        if latest_census_data:
+            census_year = latest_census_data.census_year
+        else:
+            return {
+                'base_required_sites': 0,
+                'direct_service_offset_percentage': None,
+                'direct_service_offset_source': '',
+                'required_sites': 0,
+            }
+
+    base_required = calculate_required_sites(community, program, census_year)
+    pct, source = _get_direct_service_offset(community, program, census_year)
+    required = apply_direct_service_offset(base_required, pct) if pct else base_required
+    return {
+        'base_required_sites': int(base_required or 0),
+        'direct_service_offset_percentage': int(pct) if pct else None,
+        'direct_service_offset_source': source or '',
+        'required_sites': int(required or 0),
+    }
+
+
 def count_actual_sites(community: Community, program: str, census_year: Optional[CensusYear] = None) -> int:
     """
-    Count actual active sites for a community and program in a specific census year.
+    Count actual active NON-EVENT sites for a community and program in a specific census year.
 
     SiteCensusData.community is always kept in sync with reallocations (reallocate()
     moves the FK, undo reverts it), so a simple filter is the source of truth.
@@ -199,11 +284,68 @@ def count_actual_sites(community: Community, program: str, census_year: Optional
         **{program_field: True}
     )
 
-    queryset = queryset.filter(
-        ~Q(site_type='Event') | Q(event_approved=True)
-    )
-
+    # Tool B: Events are handled separately and capped by regulatory percentage.
+    queryset = queryset.exclude(site_type='Event')
     return queryset.count()
+
+
+def get_event_offset_percentage_cap(census_year: CensusYear, program: str) -> int:
+    """
+    Regulatory cap for how many events may offset shortfall, as a percentage of required sites.
+    Preference order:
+    1) program-specific Events rule (same census year)
+    2) any active Events rule for the census year (used as a global default)
+    3) fallback to 35%
+    """
+    rule = (
+        RegulatoryRuleCensusData.objects.filter(
+            census_year=census_year,
+            program=program,
+            rule_type='Events',
+            is_active=True,
+        )
+        .exclude(event_offset_percentage__isnull=True)
+        .order_by('-updated_at')
+        .first()
+    )
+    if rule and rule.event_offset_percentage is not None:
+        return max(0, min(100, int(rule.event_offset_percentage)))
+
+    global_rule = (
+        RegulatoryRuleCensusData.objects.filter(
+            census_year=census_year,
+            rule_type='Events',
+            is_active=True,
+        )
+        .exclude(event_offset_percentage__isnull=True)
+        .order_by('-updated_at')
+        .first()
+    )
+    if global_rule and global_rule.event_offset_percentage is not None:
+        return max(0, min(100, int(global_rule.event_offset_percentage)))
+
+    return 35
+
+
+def count_approved_event_sites(community: Community, program: str, census_year: CensusYear) -> int:
+    program_field_map = {
+        'Paint': 'program_paint',
+        'Lighting': 'program_lights',
+        'Solvents': 'program_solvents',
+        'Pesticides': 'program_pesticides',
+        'Fertilizers': 'program_fertilizers',
+    }
+    program_field = program_field_map.get(program)
+    if not program_field:
+        return 0
+    return SiteCensusData.objects.filter(
+        community=community,
+        census_year=census_year,
+        is_active=True,
+        site_type='Event',
+        event_approved=True,
+        **{program_field: True},
+    ).count()
 
 
 def calculate_required_events(
@@ -344,22 +486,68 @@ def calculate_compliance(
         # No active regulatory rules for this program - return zero metrics
         return zero_metrics
     
-    # Calculate required sites (uses active Regulatory Rule Census Data)
-    required_sites = calculate_required_sites(community, program, census_year)
-    
-    # Count actual sites (uses active Site Census Data)
-    actual_sites = count_actual_sites(community, program, census_year)
-    
+    # Calculate required sites (base + Tool A direct service offset)
+    req_detail = calculate_required_sites_with_offset(community, program, census_year)
+    base_required_sites = req_detail['base_required_sites']
+    final_required_sites = req_detail['required_sites']
+
+    # Adjacent reallocations: already reflected in SiteCensusData.community (we move the FK on reallocate()).
+    # Keep a count for reporting only.
+    from sites.models import SiteReallocation
+    program_field_map = {
+        'Paint': 'program_paint',
+        'Lighting': 'program_lights',
+        'Solvents': 'program_solvents',
+        'Pesticides': 'program_pesticides',
+        'Fertilizers': 'program_fertilizers',
+    }
+    program_field = program_field_map.get(program)
+    sites_from_adjacent_qs = SiteReallocation.objects.filter(
+        census_year=census_year,
+        to_community=community,
+    )
+    if program_field:
+        sites_from_adjacent_qs = sites_from_adjacent_qs.filter(**{f'site_census_data__{program_field}': True})
+    sites_from_adjacent = sites_from_adjacent_qs.count()
+
+    # Tool B: Events can offset shortfall up to regulatory % of required sites.
+    events_available = count_approved_event_sites(community, program, census_year)
+    event_pct = get_event_offset_percentage_cap(census_year, program)
+    max_events_allowed = int(math.floor((final_required_sites or 0) * (event_pct / 100.0))) if final_required_sites else 0
+
+    # Calculate net direct service offset (negative means reduction)
+    net_direct_service_offset = base_required_sites - final_required_sites
+
+    required_sites = int(final_required_sites or 0)
+
+    # Count actual NON-EVENT sites. Reallocated sites are already included because FK moved.
+    actual_non_event = count_actual_sites(community, program, census_year)
+    shortfall_without_events = max(0, required_sites - actual_non_event)
+    events_applied = min(events_available, shortfall_without_events, max_events_allowed)
+    actual_sites = int(actual_non_event + events_applied)
+
+    # Remaining requirement after counting offsets (adjacent reallocations + applied events).
+    # This mirrors the breakdown used by the frontend docs: base shortfall is computed without events,
+    # then events reduce it, and adjacent allocations cover part of the requirement.
+    sites_from_requirements = max(0, required_sites - int(sites_from_adjacent or 0) - int(events_applied or 0))
+
     shortfall = max(0, required_sites - actual_sites)
     excess = max(0, actual_sites - required_sites)
-    
+
     if required_sites > 0:
         compliance_rate = min(100.0, (actual_sites / required_sites) * 100)
     else:
         compliance_rate = 100.0 if actual_sites == 0 else 100.0
-    
+
     return {
         'required_sites': required_sites,
+        'base_required_sites': base_required_sites,
+        'sites_from_requirements': sites_from_requirements,
+        'sites_from_adjacent': sites_from_adjacent,
+        'sites_from_events': int(events_applied),
+        'net_direct_service_offset': net_direct_service_offset,
+        'direct_service_offset_percentage': req_detail['direct_service_offset_percentage'],
+        'direct_service_offset_source': req_detail['direct_service_offset_source'],
         'actual_sites': actual_sites,
         'shortfall': shortfall,
         'excess': excess,

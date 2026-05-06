@@ -7,6 +7,7 @@ from .views import (
     ExcessReallocationOverviewView,
     MapAdjacentReallocationOverviewView,
     ToolCAdjacentReallocationListView,
+    SiteBulkDelete,
 )
 
 urlpatterns = [
@@ -18,6 +19,8 @@ urlpatterns = [
     # Event Listing
     path('event-listing/', EventListing.as_view(), name='event-listing'),
     path('event-listing/<uuid:pk>/', EventListing.as_view(), name='event-listing-detail'),
+    # Bulk delete SiteCensusData
+    path('bulk-delete/', SiteBulkDelete.as_view(), name='site-bulk-delete'),
     # CSV Import/Export
     path('census-data/import-export/', SiteCensusDataImportExport.as_view(), name='site-census-data-import-export'),
     path('census-data/template/', SiteCensusDataImportTemplate.as_view(), name='site-census-data-template'),

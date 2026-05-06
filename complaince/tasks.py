@@ -42,26 +42,11 @@ def calculate_all_compliance(self, census_year_id: int = None):
                 logger.error("No census year found")
                 return
         
-        from sites.models import SiteCensusData
+        from .compliance_scope import communities_queryset_for_census_year
 
-        # Communities with active census data for this year
-        community_ids_census = set(
-            CommunityCensusData.objects.filter(
-                census_year=census_year,
-                is_active=True,
-            ).values_list('community_id', flat=True)
-        )
-
-        # Communities that have sites in this census year (may lack CommunityCensusData)
-        community_ids_sites = set(
-            SiteCensusData.objects.filter(
-                census_year=census_year,
-                is_active=True,
-            ).exclude(community__isnull=True).values_list('community_id', flat=True)
-        )
-
-        all_community_ids = community_ids_census | community_ids_sites
-        communities = Community.objects.filter(id__in=all_community_ids).order_by('name')
+        # Same scope as POST /api/compliance/recalculate/ (manual bulk): census rows,
+        # sites, reallocations, and any existing calculation rows for the year.
+        communities = communities_queryset_for_census_year(census_year)
 
         total_calculations = 0
         total_communities = communities.count()
@@ -80,6 +65,13 @@ def calculate_all_compliance(self, census_year_id: int = None):
                         program=program,
                         census_year=census_year,
                         defaults={
+                            'base_required_sites': metrics.get('base_required_sites', 0) or 0,
+                            'sites_from_requirements': metrics.get('sites_from_requirements', 0) or 0,
+                            'sites_from_adjacent': metrics.get('sites_from_adjacent', 0) or 0,
+                            'sites_from_events': metrics.get('sites_from_events', 0) or 0,
+                            'net_direct_service_offset': metrics.get('net_direct_service_offset', 0) or 0,
+                            'direct_service_offset_percentage': metrics.get('direct_service_offset_percentage'),
+                            'direct_service_offset_source': metrics.get('direct_service_offset_source', '') or '',
                             'required_sites': metrics['required_sites'],
                             'actual_sites': metrics['actual_sites'],
                             'shortfall': metrics['shortfall'],
@@ -184,6 +176,13 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
                     program=prog,
                     census_year=census_year,
                     defaults={
+                        'base_required_sites': metrics.get('base_required_sites', 0) or 0,
+                        'sites_from_requirements': metrics.get('sites_from_requirements', 0) or 0,
+                        'sites_from_adjacent': metrics.get('sites_from_adjacent', 0) or 0,
+                        'sites_from_events': metrics.get('sites_from_events', 0) or 0,
+                        'net_direct_service_offset': metrics.get('net_direct_service_offset', 0) or 0,
+                        'direct_service_offset_percentage': metrics.get('direct_service_offset_percentage'),
+                        'direct_service_offset_source': metrics.get('direct_service_offset_source', '') or '',
                         'required_sites': metrics['required_sites'],
                         'actual_sites': metrics['actual_sites'],
                         'shortfall': metrics['shortfall'],
@@ -216,3 +215,41 @@ def calculate_community_compliance(self, community_id: str, program: str = None,
     except Exception as e:
         logger.error(f"Error calculating compliance for community {community_id}: {str(e)}")
         raise
+
+
+def schedule_community_compliance_recalc(community_id, census_year_id, program=None):
+    """
+    Queue ``calculate_community_compliance``. If the broker is unreachable, run synchronously
+    so compliance rows still update (signals no longer silently no-op).
+
+    Returns the Celery result object (from ``delay`` or ``apply``).
+    """
+    kwargs = {
+        'community_id': str(community_id),
+        'census_year_id': int(census_year_id),
+    }
+    if program:
+        kwargs['program'] = program
+    try:
+        return calculate_community_compliance.delay(**kwargs)
+    except Exception as exc:
+        logger.warning(
+            'Celery enqueue failed for community %s census_year %s (%s); running inline.',
+            community_id,
+            census_year_id,
+            exc,
+        )
+        return calculate_community_compliance.apply(kwargs=kwargs)
+
+
+def schedule_all_compliance_recalc(census_year_id=None):
+    """Queue ``calculate_all_compliance``; fall back to synchronous run if enqueue fails."""
+    try:
+        return calculate_all_compliance.delay(census_year_id=census_year_id)
+    except Exception as exc:
+        logger.warning(
+            'Celery enqueue failed for calculate_all_compliance (%s); running inline.', exc
+        )
+        if census_year_id is not None:
+            return calculate_all_compliance.apply(kwargs={'census_year_id': int(census_year_id)})
+        return calculate_all_compliance.apply()

@@ -12,5 +12,6 @@ def api_root(request, format=None):
 urlpatterns = [
     path('', api_root),
     path('rules/', views.RegulatoryRuleListCreate.as_view(), name='rule-list'),
+    path('rules/export/', views.RegulatoryRuleCensusDataExportView.as_view(), name='rule-export-csv'),
     path('rules/<int:pk>/', views.RegulatoryRuleDetail.as_view(), name='rule-detail'),
 ]
