@@ -79,13 +79,17 @@ class AdjacentCommunityReallocationSerializer(serializers.ModelSerializer):
         ).first()
 
         if compliance:
+            from complaince.utils import compliance_rate_percentage
+
             return {
                 'program': compliance.program,
                 'required_sites': compliance.required_sites,
                 'actual_sites': compliance.actual_sites,
                 'shortfall': compliance.shortfall,
                 'excess': compliance.excess,
-                'compliance_rate': str(compliance.compliance_rate),
+                'compliance_rate': compliance_rate_percentage(
+                    compliance.actual_sites, compliance.required_sites
+                ),
                 'calculation_date': compliance.calculation_date
             }
         return None
@@ -391,7 +395,7 @@ class MapDataSerializer(serializers.Serializer):
 
         parsed_filters = {}
         for key, value in filters.items():
-            if key in ['operator_types', 'site_types', 'municipalities', 'status', 'programs']:
+            if key in ['operator_types', 'site_types', 'municipalities', 'communities', 'status', 'programs']:
                 parsed_filters[key] = parse_list_filter(value)
             else:
                 parsed_filters[key] = value
@@ -418,10 +422,16 @@ class MapDataSerializer(serializers.Serializer):
             is_active=True
         ).select_related('community')
 
-        # Apply search filter to municipalities if provided
+        # Apply search filter to municipalities if provided (legacy text search)
         if parsed_filters.get('search'):
             municipalities_queryset = municipalities_queryset.filter(
                 community__name__icontains=parsed_filters['search']
+            )
+        # Apply dropdown-style community filter (by community UUID)
+        communities_filter = parsed_filters.get('communities') or parsed_filters.get('municipalities')
+        if communities_filter:
+            municipalities_queryset = municipalities_queryset.filter(
+                community__id__in=communities_filter
             )
 
         municipalities_data = []
@@ -468,6 +478,10 @@ class MapDataSerializer(serializers.Serializer):
         )
 
         # Apply filters
+        # Dropdown-style community filter (accepts both 'communities' and legacy 'municipalities')
+        communities_filter = parsed_filters.get('communities') or parsed_filters.get('municipalities')
+        if communities_filter:
+            sites_queryset = sites_queryset.filter(community__id__in=communities_filter)
         if parsed_filters.get('search'):
             search_query = parsed_filters['search']
             sites_queryset = sites_queryset.filter(
@@ -480,8 +494,9 @@ class MapDataSerializer(serializers.Serializer):
         if parsed_filters.get('operator_types'):
             sites_queryset = sites_queryset.filter(operator_type__in=parsed_filters['operator_types'])
 
-        if parsed_filters.get('municipalities'):
-            sites_queryset = sites_queryset.filter(community__name__in=parsed_filters['municipalities'])
+        # Backward compatibility: explicit municipalities filter
+        if parsed_filters.get('municipalities') and not communities_filter:
+            sites_queryset = sites_queryset.filter(community__id__in=parsed_filters['municipalities'])
 
         # Compute overall counts BEFORE applying status filter so the response
         # always shows active / inactive / total regardless of the status param.

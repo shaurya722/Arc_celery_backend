@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import ComplianceCalculation, DirectServiceOffset, CommunityOffset
+from .utils import compliance_rate_percentage
 
 
 class ComplianceCalculationSerializer(serializers.ModelSerializer):
@@ -7,6 +8,7 @@ class ComplianceCalculationSerializer(serializers.ModelSerializer):
     census_year_value = serializers.IntegerField(source='census_year.year', read_only=True, allow_null=True)
     created_by_username = serializers.CharField(source='created_by.username', read_only=True, allow_null=True)
     status = serializers.SerializerMethodField()
+    compliance_rate = serializers.SerializerMethodField()
     # Extra display fields for Tool A direct service offsets
     base_required_sites = serializers.IntegerField(read_only=True)
     direct_service_offset_percentage = serializers.IntegerField(read_only=True, allow_null=True)
@@ -24,7 +26,10 @@ class ComplianceCalculationSerializer(serializers.ModelSerializer):
             return 'shortfall'
         else:
             return 'excess'
-    
+
+    def get_compliance_rate(self, obj):
+        return compliance_rate_percentage(obj.actual_sites, obj.required_sites)
+
     class Meta:
         model = ComplianceCalculation
         fields = [

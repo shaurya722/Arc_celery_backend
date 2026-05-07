@@ -9,6 +9,17 @@ from .serializers import DirectServiceOffsetSerializer, CommunityOffsetSerialize
 from .utils import calculate_required_sites, _get_direct_service_offset, apply_direct_service_offset
 
 
+def _request_sort_param(query_params, default='community_name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
 class DirectServiceOffsetListCreate(APIView):
     """
     GET: List all global direct service offsets
@@ -392,6 +403,23 @@ class DirectServiceOffsetPreview(APIView):
                 'new_required_sites': new_required,
                 'has_community_override': has_community_override,
             })
+
+        sort = _request_sort_param(request.query_params, 'community_name')
+        reverse = str(sort).startswith('-')
+        sort_key = str(sort)[1:] if reverse else str(sort)
+        sort_map = {
+            'name': lambda row: row['community_name'].lower(),
+            'community_name': lambda row: row['community_name'].lower(),
+            'population': lambda row: row.get('population') or 0,
+            'base_required': lambda row: row.get('base_required_sites') or 0,
+            'base_required_sites': lambda row: row.get('base_required_sites') or 0,
+            'offset_percentage': lambda row: row.get('offset_percentage') or 0,
+            'percentage': lambda row: row.get('offset_percentage') or 0,
+            'new_required': lambda row: row.get('new_required_sites') or 0,
+            'new_required_sites': lambda row: row.get('new_required_sites') or 0,
+            'has_community_override': lambda row: row.get('has_community_override') or False,
+        }
+        results.sort(key=sort_map.get(sort_key, sort_map['community_name']), reverse=reverse)
         # Apply pagination
         total = len(results)
         start = (page - 1) * limit

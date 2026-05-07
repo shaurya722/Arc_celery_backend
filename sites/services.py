@@ -8,6 +8,7 @@ from django.db import IntegrityError, transaction
 from django.core.exceptions import ValidationError
 from .models import SiteCensusData, SiteReallocation
 from community.models import Community, AdjacentCommunity
+from complaince.utils import compliance_rate_percentage
 
 
 def compliance_calc_snapshot(calc):
@@ -22,7 +23,9 @@ def compliance_calc_snapshot(calc):
         'actual_sites': calc.actual_sites,
         'shortfall': calc.shortfall,
         'excess': calc.excess,
-        'compliance_rate': float(calc.compliance_rate or 0),
+        'compliance_rate': compliance_rate_percentage(
+            calc.actual_sites, calc.required_sites
+        ),
         'sites_from_adjacent': getattr(calc, 'sites_from_adjacent', 0) or 0,
         'sites_from_requirements': getattr(calc, 'sites_from_requirements', 0) or 0,
         'sites_from_events': getattr(calc, 'sites_from_events', 0) or 0,
@@ -38,7 +41,14 @@ class SiteReallocationService:
     @staticmethod
     def reallocate(site_census_data, to_community, user=None, reason=None, program=None):
         """
-        Reallocate a site from its current effective community to an adjacent community.
+        Reallocate ONE program of a site from its source community to an adjacent
+        community, without moving the site itself between communities.
+
+        ``SiteCensusData.community`` is intentionally NOT changed: the site stays
+        in its source community for listings and any program that wasn't
+        reallocated. The per-program move is recorded on
+        ``SiteReallocation.program`` and is the source of truth used by
+        compliance counting (see ``complaince.utils.count_actual_sites``).
 
         Adjacency: map ``Community.adjacent`` when that community has map neighbors; otherwise
         legacy AdjacentCommunity (either direction) for the site census year.
@@ -48,7 +58,7 @@ class SiteReallocationService:
         (cap from RegulatoryRuleCensusData Reallocation rule, else 10%).
 
         Uses ``select_for_update`` on the site census row to prevent concurrent double inserts.
-        Enforces one allocation row per (site, census year, from, to) at DB level.
+        Enforces one allocation row per (site, census year, from, to, program) at DB level.
         """
         from complaince.models import ComplianceCalculation
 
@@ -99,6 +109,14 @@ class SiteReallocationService:
                     f"Cannot reallocate to the same community: {from_community.name}"
                 )
 
+            enabled_programs = [
+                p for p, f in PROGRAM_FIELD.items() if getattr(locked_sc, f, False)
+            ]
+            if len(enabled_programs) > 1 and not program:
+                raise ValidationError(
+                    'This site participates in multiple programs; pass an explicit '
+                    f'"program" field (enabled: {", ".join(enabled_programs)}).'
+                )
             resolved_program = program or infer_program_from_site(locked_sc)
             if not resolved_program:
                 raise ValidationError(
@@ -152,12 +170,12 @@ class SiteReallocationService:
                     params=_params(src_calc, tgt_calc),
                 )
 
-            program_filter = {f'site_census_data__{field}': True}
-
+            # Per-program counts: only reallocations that moved THIS program count
+            # toward source excess and target shortfall caps.
             outbound_count = SiteReallocation.objects.filter(
                 from_community=from_community,
                 census_year=census_year,
-                **program_filter,
+                program=resolved_program,
             ).count()
             src_excess = src_calc.excess or 0
             if src_excess >= 1 and outbound_count >= src_excess:
@@ -172,7 +190,7 @@ class SiteReallocationService:
             inbound_count = SiteReallocation.objects.filter(
                 to_community=to_community,
                 census_year=census_year,
-                **program_filter,
+                program=resolved_program,
             ).count()
             tgt_shortfall = tgt_calc.shortfall or 0
             if tgt_shortfall >= 1 and inbound_count >= tgt_shortfall:
@@ -206,17 +224,20 @@ class SiteReallocationService:
                     params=_params(src_calc, tgt_calc),
                 )
 
+            # Per-program duplicate guard — same site/year/route is fine for two
+            # different programs but never for the same program twice.
             dup_q = SiteReallocation.objects.filter(
                 site_census_data_id=locked_sc.pk,
                 census_year_id=census_year.pk,
                 from_community_id=from_community.pk,
                 to_community_id=to_community.pk,
+                program=resolved_program,
             )
             if dup_q.exists():
                 raise ValidationError(
                     (
-                        'An identical adjacent allocation already exists for this site, census year, '
-                        f'and route ({from_community.name} → {to_community.name}).'
+                        f'An identical adjacent allocation already exists for this site, census year, '
+                        f'route ({from_community.name} → {to_community.name}) and program ({resolved_program}).'
                     ),
                     params=_params(src_calc, tgt_calc),
                 )
@@ -227,6 +248,7 @@ class SiteReallocationService:
                     from_community=from_community,
                     to_community=to_community,
                     census_year=census_year,
+                    program=resolved_program,
                     created_by=user,
                     reason=reason,
                 )
@@ -237,10 +259,12 @@ class SiteReallocationService:
                     params=_params(src_calc, tgt_calc),
                 ) from None
 
-            locked_sc.community = to_community
-            locked_sc.save(update_fields=['community'])
+            # NOTE: ``locked_sc.community`` is intentionally NOT changed. Only the
+            # specific ``resolved_program`` moves; the site (and its other programs)
+            # stay associated with ``from_community``.
 
-        # Recompute compliance immediately so UI reflects "sites_from_adjacent".
+        # Recompute compliance immediately so UI reflects "sites_from_adjacent"
+        # for the program that actually moved (other programs are unaffected).
         try:
             from complaince.utils import calculate_compliance
             from complaince.models import ComplianceCalculation
@@ -276,13 +300,16 @@ class SiteReallocationService:
     @staticmethod
     def undo_reallocation(reallocation_id, user=None):
         """
-        Undo a reallocation by deleting the reallocation record.
-        The site will revert to its previous community (or original if no other reallocations).
-        
+        Undo a per-program reallocation by deleting the reallocation record.
+
+        ``SiteCensusData.community`` is not touched (per-program reallocation never
+        moved it). The program that this row tracked stops being counted at
+        ``to_community`` and goes back to ``from_community`` automatically.
+
         Args:
             reallocation_id: UUID of the SiteReallocation to undo
             user: User performing the undo (optional)
-            
+
         Returns:
             dict with undo details
         """
@@ -295,26 +322,24 @@ class SiteReallocationService:
         from_community = reallocation.from_community
         to_community = reallocation.to_community
         census_year = reallocation.census_year
+        program_to_recompute = reallocation.program
         
         with transaction.atomic():
             reallocation.delete()
 
-            # Revert site to original source community (or the previous reallocation target
-            # if there are older reallocation records).
-            prev = site_census_data.reallocations.order_by('-reallocated_at').first()
-            revert_to = prev.to_community if prev else from_community
-            site_census_data.community = revert_to
-            site_census_data.save(update_fields=['community'])
-
-        # Recompute compliance immediately after undo.
+        # Recompute compliance for the program that was undone (and its from/to).
+        # Legacy NULL-program rows fall back to inferring from the site's flags.
         try:
             from complaince.utils import calculate_compliance
             from complaince.models import ComplianceCalculation
             from .adjacent_reallocation import infer_program_from_site
-            # affected: original from, undo target, and revert_to (could differ)
-            affected = {from_community, to_community, revert_to}
-            resolved_program = infer_program_from_site(site_census_data) or 'Paint'
-            for comm in affected:
+
+            resolved_program = (
+                program_to_recompute
+                or infer_program_from_site(site_census_data)
+                or 'Paint'
+            )
+            for comm in {from_community, to_community}:
                 metrics = calculate_compliance(comm, resolved_program, census_year)
                 ComplianceCalculation.objects.update_or_create(
                     community=comm,
@@ -342,8 +367,9 @@ class SiteReallocationService:
         return {
             'message': 'Reallocation undone successfully',
             'site': site_census_data.site.site_name,
-            'reverted_from': to_community.name,
-            'reverted_to': revert_to.name,
+            'program': program_to_recompute,
+            'from_community': from_community.name,
+            'to_community': to_community.name,
         }
     
     @staticmethod
@@ -397,7 +423,10 @@ class SiteReallocationService:
                 'actual': compliance_records.actual_sites,
                 'shortfall': compliance_records.shortfall,
                 'excess': compliance_records.excess,
-                'compliance_rate': float(compliance_records.compliance_rate)
+                'compliance_rate': compliance_rate_percentage(
+                    compliance_records.actual_sites,
+                    compliance_records.required_sites,
+                )
             }
         elif not program and compliance_records.exists():
             # Aggregate across all programs
@@ -411,7 +440,7 @@ class SiteReallocationService:
                 'actual': total_actual,
                 'shortfall': total_shortfall,
                 'excess': total_excess,
-                'compliance_rate': round((total_actual / total_required * 100) if total_required > 0 else 0, 2)
+                'compliance_rate': compliance_rate_percentage(total_actual, total_required),
             }
         
         from .adjacent_reallocation import neighbors_for_reallocation
@@ -523,13 +552,15 @@ class SiteReallocationService:
                 'actual': calc.actual_sites,
                 'shortfall': calc.shortfall,
                 'excess': calc.excess,
-                'compliance_rate': float(calc.compliance_rate)
+                'compliance_rate': compliance_rate_percentage(
+                    calc.actual_sites, calc.required_sites
+                ),
             })
 
         for community_id, metrics in community_metrics.items():
             required = metrics['required']
             actual = metrics['actual']
-            metrics['compliance_rate'] = round((actual / required * 100) if required else 0, 2)
+            metrics['compliance_rate'] = compliance_rate_percentage(actual, required)
             metrics['community_id'] = str(metrics['community'].id)
             metrics['community_name'] = metrics['community'].name
             metrics['program_breakdown'] = program_breakdown.get(community_id, [])
@@ -743,10 +774,12 @@ class SiteReallocationService:
         if search and str(search).strip():
             calc_qs = calc_qs.filter(community__name__icontains=str(search).strip())
 
-        # Preload reallocations for this year + program (from any source)
-        realloc_qs = SiteReallocation.objects.filter(
-            census_year=census_year,
-            **{f'site_census_data__{field}': True},
+        # Preload reallocations for this year + program (from any source).
+        # Per-program rows store ``program``; legacy NULL rows fall back to the
+        # site's program flag for backwards compatibility.
+        realloc_qs = SiteReallocation.objects.filter(census_year=census_year).filter(
+            Q(program=program)
+            | Q(program__isnull=True, **{f'site_census_data__{field}': True})
         ).select_related('site_census_data__site', 'from_community', 'to_community')
 
         realloc_by_pair = defaultdict(list)

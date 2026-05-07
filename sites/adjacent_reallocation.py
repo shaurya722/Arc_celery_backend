@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Dict, Optional
 
-from django.db.models import Count
+from django.db.models import Count, Q
 
 from community.models import AdjacentCommunity, CensusYear, Community, CommunityCensusData
 from regulatory_rules.models import RegulatoryRuleCensusData
@@ -28,6 +28,9 @@ PROGRAM_FIELD = {
 # Last-resort fallback when *no* active Reallocation rule provides a percentage.
 # Prefer pulling a percentage from RegulatoryRuleCensusData whenever possible.
 FALLBACK_REALLOCATION_PERCENT = 10
+
+# Alias for callers that expect this name (same value as ``FALLBACK_REALLOCATION_PERCENT``).
+DEFAULT_REALLOCATION_PERCENT = FALLBACK_REALLOCATION_PERCENT
 
 HSP_PROGRAMS = {"Paint", "Solvents", "Pesticides", "Fertilizers"}
 
@@ -131,10 +134,14 @@ def count_inbound_reallocations_for_program(
     field = PROGRAM_FIELD.get(program)
     if not field:
         return 0
+    # Per-program rows have ``program`` set; legacy NULL rows are matched by the
+    # site's program flag for backwards compatibility.
     return SiteReallocation.objects.filter(
         to_community=to_community,
         census_year=census_year,
-        **{f'site_census_data__{field}': True},
+    ).filter(
+        Q(program=program)
+        | Q(program__isnull=True, **{f'site_census_data__{field}': True})
     ).count()
 
 
@@ -162,9 +169,10 @@ def inbound_reallocation_counts_by_community(
     if not field:
         return {}
     rows = (
-        SiteReallocation.objects.filter(
-            census_year=census_year,
-            **{f'site_census_data__{field}': True},
+        SiteReallocation.objects.filter(census_year=census_year)
+        .filter(
+            Q(program=program)
+            | Q(program__isnull=True, **{f'site_census_data__{field}': True})
         )
         .values('to_community_id')
         .annotate(c=Count('id'))

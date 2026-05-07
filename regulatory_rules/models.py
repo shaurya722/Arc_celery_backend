@@ -110,8 +110,8 @@ class RegulatoryRuleCensusData(models.Model):
             self.event_offset_percentage = None
             self.reallocation_percentage = None
         
-        # Auto-deactivate if end date has passed
-        if self.end_date and self.end_date < timezone.now():
+        # Auto-deactivate when end time is reached (matches periodic expiry task).
+        if self.end_date and self.end_date <= timezone.now():
             self.is_active = False
         
         super().save(*args, **kwargs)

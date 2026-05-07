@@ -14,7 +14,10 @@ from community.models import CensusYear, CommunityCensusData
 from sites.models import SiteCensusData
 
 from .models import ComplianceCalculation
-from .views import AuthenticatedAPIView
+from .utils import compliance_rate_db_expression
+from .views import AuthenticatedAPIView, filter_compliance_calculation_queryset
+from community.views import filter_community_census_queryset
+from sites.views import filter_site_census_queryset
 
 STANDARD_PROGRAMS = ('Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers')
 
@@ -37,13 +40,13 @@ def _inactive_ccd_exists():
     )
 
 
-def _calculations_qs_for_year(census_year: CensusYear):
-    return (
-        ComplianceCalculation.objects.filter(census_year=census_year)
-        .annotate(_inactive=_inactive_ccd_exists())
-        .filter(_inactive=False)
-        .select_related('community')
-    )
+def _calculations_qs_for_year(request, census_year: CensusYear):
+    """
+    Keep dashboard numbers consistent with the main compliance list API by
+    reusing its queryset filter logic (inactive community exclusion, optional
+    query-param filters like program/community/year when present).
+    """
+    return filter_compliance_calculation_queryset(request).filter(census_year=census_year)
 
 
 def _resolve_dashboard_census_year(request):
@@ -130,20 +133,33 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         except (TypeError, ValueError):
             table_limit = 10
 
-        calc_qs = _calculations_qs_for_year(census_year)
+        calc_qs = _calculations_qs_for_year(request, census_year)
 
+        # Keep "tracked municipalities" consistent with Community listings:
+        # use the same CommunityCensusData filters, defaulting to active=true.
+        ccd_qs = CommunityCensusData.objects.filter(census_year=census_year)
+        qp_ccd = request.query_params.copy()
+        if qp_ccd.get('is_active') in (None, ''):
+            qp_ccd['is_active'] = 'true'
+        ccd_qs = filter_community_census_queryset(ccd_qs, qp_ccd)
         municipalities_tracked = (
-            CommunityCensusData.objects.filter(census_year=census_year, is_active=True).aggregate(
-                n=Count('community_id', distinct=True)
-            )['n']
-            or 0
+            ccd_qs.aggregate(n=Count('community_id', distinct=True))['n'] or 0
         )
 
-        # --- KPI: total site census rows (collection + events unless excluded)
-        site_filter = Q(census_year=census_year, is_active=True)
-        if exclude_events:
-            site_filter &= ~Q(site_type='Event')
-        total_sites = SiteCensusData.objects.filter(site_filter).count()
+        # --- KPI: site census rows (match Sites listing API counts)
+        # SiteListCreate uses filter_site_census_queryset() and then reports:
+        # total_sites = queryset.count()
+        # active_sites = queryset.filter(is_active=True).count()
+        # inactive_sites = queryset.filter(is_active=False).count()
+        site_base_qs = SiteCensusData.objects.filter(census_year=census_year)
+        qp_sites = request.query_params.copy()
+        # IMPORTANT: do NOT default is_active=true here, because the Sites listing UI
+        # typically shows total/active/inactive together when is_active is not passed.
+        site_base_qs = filter_site_census_queryset(site_base_qs, qp_sites)
+        # Include all site types (Collection sites + Events) in counts
+        total_site_rows = site_base_qs.count()
+        active_site_rows = site_base_qs.filter(is_active=True).count()
+        inactive_site_rows = site_base_qs.filter(is_active=False).count()
 
         # --- Municipality rollup (mutually exclusive donut buckets)
         by_community = {}
@@ -171,15 +187,23 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         municipalities_in_calc = len(by_community)
         municipalities_compliant_no_shortfall = municipalities_in_calc - muni_shortfall
 
-        overall_rate_row = calc_qs.aggregate(avg=Avg('compliance_rate'))
+        overall_rate_row = (
+            calc_qs.annotate(_avg_cr=compliance_rate_db_expression())
+            .aggregate(avg=Avg('_avg_cr'))
+        )
         overall_rate = round(float(overall_rate_row['avg'] or 0), 2)
 
+        # These aggregates should match the compliance list API summary fields.
         agg_sums = calc_qs.aggregate(
             sum_shortfall=Sum('shortfall'),
             sum_excess=Sum('excess'),
+            sum_actual_sites=Sum('actual_sites'),
         )
         total_shortfall_units = int(agg_sums['sum_shortfall'] or 0)
         total_excess_units = int(agg_sums['sum_excess'] or 0)
+        total_actual_sites_units = int(agg_sums['sum_actual_sites'] or 0)
+
+        compliant_program_rows = calc_qs.filter(shortfall=0, excess=0).count()
 
         compliance_rate_municipalities_pct = (
             round(100.0 * municipalities_compliant_no_shortfall / municipalities_in_calc, 2)
@@ -188,7 +212,18 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         )
 
         kpi = {
-            'total_sites': total_sites,
+            # Match compliance list API summary naming/values:
+            # - total_sites: sum of actual_sites across calculation rows
+            # - compliant_communities: count of compliant calculation rows
+            'total_sites': total_actual_sites_units,
+            'compliant_communities': compliant_program_rows,
+            'shortfalls': total_shortfall_units,
+            'excesses': total_excess_units,
+
+            # Keep site-row KPI as a separate key for dashboards that want it.
+            'total_site_rows': total_site_rows,
+            'active_site_rows': active_site_rows,
+            'inactive_site_rows': inactive_site_rows,
             'municipalities_tracked': municipalities_tracked,
             'municipalities_with_calculations': municipalities_in_calc,
             'compliance_rate_avg_program_rows': overall_rate,
@@ -212,7 +247,12 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         program_compliance = []
         for prog in STANDARD_PROGRAMS:
             qs_p = calc_qs.filter(program=prog)
-            compliant_c = qs_p.filter(shortfall=0).values('community_id').distinct().count()
+            # Match ComplianceCalculationListCreate status logic:
+            # - compliant: shortfall == 0 AND excess == 0
+            # - shortfall: shortfall > 0
+            compliant_c = (
+                qs_p.filter(shortfall=0, excess=0).values('community_id').distinct().count()
+            )
             shortfall_c = qs_p.filter(shortfall__gt=0).values('community_id').distinct().count()
             display = 'Lights' if prog == 'Lighting' else prog
             program_compliance.append(
@@ -227,13 +267,8 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
                 }
             )
 
-        # --- Top communities by active site rows in this census year
-        site_comm_qs = (
-            SiteCensusData.objects.filter(census_year=census_year, is_active=True)
-            .exclude(community__isnull=True)
-        )
-        if exclude_events:
-            site_comm_qs = site_comm_qs.exclude(site_type='Event')
+        # --- Top communities by active site rows in this census year (Collection sites only)
+        site_comm_qs = site_base_qs.exclude(community__isnull=True).exclude(site_type='Event')
         top_rows = (
             site_comm_qs.values('community_id', 'community__name')
             .annotate(sites=Count('id'))
@@ -246,15 +281,13 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         # --- End-date buckets (site_end_date vs today)
         now = timezone.now()
         horizon_far = now + timedelta(days=365 * 5)
-        ending_qs = SiteCensusData.objects.filter(
-            census_year=census_year,
-            is_active=True,
-            site_end_date__isnull=False,
-            site_end_date__gte=now,
-            site_end_date__lte=horizon_far,
-        ).exclude(community__isnull=True)
-        if exclude_events:
-            ending_qs = ending_qs.exclude(site_type='Event')
+        ending_qs = (
+            site_base_qs.filter(
+                site_end_date__isnull=False,
+                site_end_date__gte=now,
+                site_end_date__lte=horizon_far,
+            ).exclude(community__isnull=True)
+        )
 
         def bucket_for(delta_days):
             if delta_days <= 30:
@@ -321,10 +354,9 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
                     return disp
             return '—'
 
+        # "ending soon" should reflect active sites
         soon_qs = (
-            SiteCensusData.objects.filter(
-                census_year=census_year,
-                is_active=True,
+            site_base_qs.filter(is_active=True).filter(
                 site_end_date__isnull=False,
                 site_end_date__gte=now,
             )
@@ -358,10 +390,13 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         # --- Trend: real multi-year average compliance (program-row average per census year)
         trend_by_year = []
         for cy in CensusYear.objects.order_by('year'):
-            qsy = _calculations_qs_for_year(cy)
+            qsy = _calculations_qs_for_year(request, cy)
             if not qsy.exists():
                 continue
-            avg_r = qsy.aggregate(avg=Avg('compliance_rate'))['avg']
+            avg_r = (
+                qsy.annotate(_avg_cr=compliance_rate_db_expression())
+                .aggregate(avg=Avg('_avg_cr'))['avg']
+            )
             trend_by_year.append(
                 {
                     'year': cy.year,
@@ -392,6 +427,14 @@ class ComplianceDashboardGraphView(AuthenticatedAPIView):
         payload = {
             'census_year': {'id': census_year.id, 'year': census_year.year},
             'chart_colors': CHART_COLORS,
+            # Same meaning/shape as GET /api/compliance/ summary (for the same query params).
+            'compliance_summary': {
+                'compliant_communities': compliant_program_rows,
+                'shortfalls': total_shortfall_units,
+                'excesses': total_excess_units,
+                'overall_rate': overall_rate,
+                'total_sites': total_actual_sites_units,
+            },
             'kpi': kpi,
             'donut': donut,
             'donut_legend': [

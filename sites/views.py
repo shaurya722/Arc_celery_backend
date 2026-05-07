@@ -22,6 +22,27 @@ from uuid import UUID
 from django.utils import timezone
 
 
+def _request_sort_param(query_params, default='name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
+def _mapped_sort(value, allowed, default):
+    raw = str(value or default).strip()
+    descending = raw.startswith('-')
+    key = raw[1:] if descending else raw
+    mapped = allowed.get(key, allowed.get(raw, default))
+    if isinstance(mapped, str) and mapped.startswith('-'):
+        return mapped
+    return f'-{mapped}' if descending else mapped
+
+
 def filter_site_census_queryset(queryset, query_params):
     """
     Apply the same filters as ``SiteListCreate`` GET (search, year, site_type, etc.).
@@ -47,6 +68,17 @@ def filter_site_census_queryset(queryset, query_params):
     operator_type = qp.get('operator_type', None)
     if operator_type:
         queryset = queryset.filter(operator_type=operator_type)
+
+    communities = qp.get('communities', None)
+    if communities:
+        if isinstance(communities, str):
+            community_ids = [item.strip() for item in communities.split(',') if item.strip()]
+        elif isinstance(communities, list):
+            community_ids = communities
+        else:
+            community_ids = [str(communities)]
+        if community_ids:
+            queryset = queryset.filter(community__id__in=community_ids)
 
     community = qp.get('community', None)
     if community:
@@ -116,7 +148,28 @@ def filter_site_census_queryset(queryset, query_params):
         sector_institutional_bool = str(sector_institutional).lower() in ['true', '1', 'yes']
         queryset = queryset.filter(sector_institutional=sector_institutional_bool)
 
-    sort = qp.get('sort', 'site__site_name')
+    sort = _mapped_sort(
+        _request_sort_param(qp, 'site__site_name'),
+        {
+            'id': 'id',
+            'site_name': 'site__site_name',
+            'name': 'site__site_name',
+            'site__site_name': 'site__site_name',
+            'community_name': 'community__name',
+            'community__name': 'community__name',
+            'census_year': 'census_year__year',
+            'census_year_value': 'census_year__year',
+            'year': 'census_year__year',
+            'site_type': 'site_type',
+            'operator_type': 'operator_type',
+            'is_active': 'is_active',
+            'site_start_date': 'site_start_date',
+            'site_end_date': 'site_end_date',
+            'created_at': 'created_at',
+            'updated_at': 'updated_at',
+        },
+        'site__site_name',
+    )
     queryset = queryset.order_by(sort)
     return queryset
 
@@ -449,6 +502,20 @@ class EventListing(AuthenticatedAPIView):
         search = request.query_params.get('search', None)
         if search:
             result = [item for item in result if search.lower() in item['community']['name'].lower()]
+
+        sort = _request_sort_param(request.query_params, 'community_name')
+        reverse = str(sort).startswith('-')
+        sort_key = str(sort)[1:] if reverse else str(sort)
+        event_sort_map = {
+            'name': lambda item: item['community']['name'].lower(),
+            'community_name': lambda item: item['community']['name'].lower(),
+            'shortfall': lambda item: item.get('shortfall', 0),
+            'applied_event': lambda item: item.get('applied_event', 0),
+            'available_event': lambda item: item.get('availabel_event', 0),
+            'availabel_event': lambda item: item.get('availabel_event', 0),
+            'events_count': lambda item: len(item.get('Events', [])),
+        }
+        result.sort(key=event_sort_map.get(sort_key, event_sort_map['community_name']), reverse=reverse)
 
         # Pagination
         paginator = self.pagination_class
@@ -844,6 +911,20 @@ class SiteCensusDataImportExport(AuthenticatedAPIView):
         return 'created'
 
 
+def _load_csv_import_template(filename: str) -> str | None:
+    """Prefer collected ``staticfiles/templates`` (user/deploy overrides), then ``static/templates``."""
+    import os
+
+    from django.conf import settings
+
+    for root in ('staticfiles', 'static'):
+        path = os.path.join(settings.BASE_DIR, root, 'templates', filename)
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+    return None
+
+
 class SiteCensusDataImportTemplate(AuthenticatedAPIView):
     """
     API to download a CSV template for importing SiteCensusData.
@@ -852,14 +933,8 @@ class SiteCensusDataImportTemplate(AuthenticatedAPIView):
     def get(self, request):
         """Download CSV template with sample data from file"""
         try:
-            import os
-            from django.conf import settings
-            
-            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'site_census_data_template.csv')
-            if os.path.exists(template_path):
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    csv_content = f.read()
-            else:
+            csv_content = _load_csv_import_template('site_census_data_template.csv')
+            if not csv_content:
                 raise FileNotFoundError("Template file not found")
                 
         except Exception:
@@ -922,10 +997,12 @@ class ReallocateSiteAPIView(AuthenticatedAPIView):
         
         Request body:
         {
-            "site_census_id": "uuid",
-            "to_community_id": "uuid",
+            "site_census_id": "...",
+            "to_community_id": "...",
+            "program": "Paint",
             "reason": "optional reason"
         }
+        ``program`` is required when the site has more than one program flag enabled.
         """
         serializer = ReallocateSiteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1311,7 +1388,7 @@ class ToolCAdjacentReallocationListView(AuthenticatedAPIView):
         census_year_id = request.query_params.get('census_year_id')
         year_value = request.query_params.get('year')
         search = request.query_params.get('search')
-        ordering = request.query_params.get('ordering', 'name')
+        ordering = _request_sort_param(request.query_params, 'name')
 
         try:
             page = int(request.query_params.get('page', 1))

@@ -147,7 +147,7 @@ class SiteCensusDataSerializer(serializers.ModelSerializer):
 
 
 class SiteReallocationSerializer(serializers.ModelSerializer):
-    """Serializer for site reallocation records"""
+    """Serializer for site reallocation records (per-program move)."""
     site_name = serializers.CharField(source='site_census_data.site.site_name', read_only=True)
     from_community_name = serializers.CharField(source='from_community.name', read_only=True)
     to_community_name = serializers.CharField(source='to_community.name', read_only=True)
@@ -161,9 +161,10 @@ class SiteReallocationSerializer(serializers.ModelSerializer):
             'from_community', 'from_community_name',
             'to_community', 'to_community_name',
             'census_year', 'census_year_value',
+            'program',
             'reallocated_at', 'created_by', 'created_by_username', 'reason'
         ]
-        read_only_fields = ['id', 'reallocated_at', 'from_community', 'census_year']
+        read_only_fields = ['id', 'reallocated_at', 'from_community', 'census_year', 'program']
 
 
 class ReallocateSiteSerializer(serializers.Serializer):
@@ -180,7 +181,10 @@ class ReallocateSiteSerializer(serializers.Serializer):
         choices=['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers'],
         required=False,
         allow_null=True,
-        help_text='Program for cap/shortfall/excess checks; inferred from site flags if omitted.',
+        help_text=(
+            'Program being reallocated (required when the site has more than one program flag). '
+            'Otherwise inferred from the single enabled program.'
+        ),
     )
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 

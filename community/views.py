@@ -26,6 +26,27 @@ class AuthenticatedAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
 
+def _request_sort_param(query_params, default='name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
+def _mapped_sort(value, allowed, default):
+    raw = str(value or default).strip()
+    descending = raw.startswith('-')
+    key = raw[1:] if descending else raw
+    mapped = allowed.get(key, allowed.get(raw, default))
+    if isinstance(mapped, str) and mapped.startswith('-'):
+        return mapped
+    return f'-{mapped}' if descending else mapped
+
+
 def filter_community_census_queryset(queryset, query_params):
     """
     Apply the same filters as ``CommunityCensusDataListCreate`` GET.
@@ -69,7 +90,7 @@ def filter_community_census_queryset(queryset, query_params):
     if max_population:
         queryset = queryset.filter(population__lte=max_population)
 
-    sort_by = qp.get('sort', 'community__name')
+    sort_by = _request_sort_param(qp, 'community__name')
     valid_sort_fields = {
         'id': 'id',
         '-id': '-id',
@@ -95,10 +116,14 @@ def filter_community_census_queryset(queryset, query_params):
         '-end_date': '-end_date',
         'name': 'community__name',
         '-name': '-community__name',
+        'community_name': 'community__name',
+        'community__name': 'community__name',
         'year': 'census_year__year',
         '-year': '-census_year__year',
+        'census_year': 'census_year__year',
+        'census_year_value': 'census_year__year',
     }
-    sort_field = valid_sort_fields.get(sort_by, 'community__name')
+    sort_field = _mapped_sort(sort_by, valid_sort_fields, 'community__name')
     queryset = queryset.order_by(sort_field)
     return queryset
 
@@ -145,7 +170,17 @@ class CommunityListCreate(AuthenticatedAPIView):
             queryset = queryset.filter(census_data__is_active=is_active_bool)
 
         # Sort
-        sort = request.query_params.get('sort', 'name')
+        sort = _mapped_sort(
+            _request_sort_param(request.query_params, 'name'),
+            {
+                'id': 'id',
+                'name': 'name',
+                'community_name': 'name',
+                'created_at': 'created_at',
+                'updated_at': 'updated_at',
+            },
+            'name',
+        )
         queryset = queryset.order_by(sort)
 
         # Pagination
@@ -168,11 +203,24 @@ class CommunityBaseListCreate(AuthenticatedAPIView):
     pagination_class = CommunityPagination()
 
     def get(self, request):
-        queryset = Community.objects.all().order_by('name').prefetch_related('adjacent')
+        queryset = Community.objects.all().prefetch_related('adjacent')
 
         search = request.query_params.get('search')
         if search:
             queryset = queryset.filter(name__icontains=search)
+
+        sort = _mapped_sort(
+            _request_sort_param(request.query_params, 'name'),
+            {
+                'id': 'id',
+                'name': 'name',
+                'community_name': 'name',
+                'created_at': 'created_at',
+                'updated_at': 'updated_at',
+            },
+            'name',
+        )
+        queryset = queryset.order_by(sort)
 
         paginator = self.pagination_class
         paginated = paginator.paginate_queryset(queryset, request)
@@ -693,6 +741,11 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
 
     # Expected CSV headers
     CSV_HEADERS = [
+        'community_id', 'community_name', 'census_year', 'population', 'tier',
+        'region', 'zone', 'province', 'is_active',
+        'start_date', 'end_date'
+    ]
+    REQUIRED_CSV_HEADERS = [
         'community_name', 'census_year', 'population', 'tier',
         'region', 'zone', 'province', 'is_active',
         'start_date', 'end_date'
@@ -715,6 +768,7 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
         # Write data rows
         for data in queryset:
             row = [
+                str(data.community.id),
                 data.community.name,
                 data.census_year.year,
                 data.population,
@@ -765,7 +819,7 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        missing_headers = set(self.CSV_HEADERS) - set(reader.fieldnames)
+        missing_headers = set(self.REQUIRED_CSV_HEADERS) - set(reader.fieldnames)
         if missing_headers:
             return Response(
                 {
@@ -821,6 +875,17 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
         errors = []
         
         # Required field validations
+        community_id = row.get('community_id', '').strip()
+        if community_id:
+            try:
+                UUID(community_id)
+            except (ValueError, TypeError):
+                errors.append({
+                    'row': row_number,
+                    'field': 'community_id',
+                    'error': f'Invalid community_id: "{community_id}". Must be a valid UUID.'
+                })
+
         community_name = row.get('community_name', '').strip()
         if not community_name:
             errors.append({
@@ -976,6 +1041,7 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
     
     def _import_row(self, row):
         """Import a single validated row. Returns 'created', 'updated', or raises exception."""
+        community_id = row.get('community_id', '').strip()
         community_name = row['community_name'].strip()
         census_year = int(row['census_year'].strip())
         population = int(row['population'].strip())
@@ -997,8 +1063,32 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
         if row.get('end_date', '').strip():
             end_date = datetime.fromisoformat(row['end_date'].strip().replace('Z', '+00:00'))
         
-        # Get or create community
-        community, _ = Community.objects.get_or_create(name=community_name)
+        # If community_id is supplied, it is the stable identity for updates.
+        # If omitted, create a brand-new community; do not silently update by name.
+        if community_id:
+            community_uuid = UUID(community_id)
+            community = Community.objects.filter(id=community_uuid).first()
+            if community:
+                if community.name != community_name:
+                    if Community.objects.exclude(id=community.id).filter(name=community_name).exists():
+                        raise ValueError(
+                            f'Cannot rename community {community_id} to "{community_name}" because that name already exists.'
+                        )
+                    community.name = community_name
+                    community.save(update_fields=['name', 'updated_at'])
+            else:
+                if Community.objects.filter(name=community_name).exists():
+                    raise ValueError(
+                        f'Cannot create community id {community_id} with name "{community_name}" because that name already exists.'
+                    )
+                community = Community.objects.create(id=community_uuid, name=community_name)
+        else:
+            if Community.objects.filter(name=community_name).exists():
+                raise ValueError(
+                    f'community_id is required to update existing community "{community_name}". '
+                    'Leave community_id blank only when creating a new community.'
+                )
+            community = Community.objects.create(name=community_name)
         
         # Get census year object
         census_year_obj = CensusYear.objects.get(year=census_year)
@@ -1038,6 +1128,20 @@ class CommunityCensusDataImportExport(AuthenticatedAPIView):
             return 'created'
 
 
+def _load_community_csv_template(filename: str) -> str | None:
+    """Prefer ``staticfiles/templates``, then ``static/templates`` (same as site template API)."""
+    import os
+
+    from django.conf import settings
+
+    for root in ('staticfiles', 'static'):
+        path = os.path.join(settings.BASE_DIR, root, 'templates', filename)
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+    return None
+
+
 class CommunityCensusDataImportTemplate(AuthenticatedAPIView):
     """
     API to download a CSV template for importing CommunityCensusData.
@@ -1046,31 +1150,24 @@ class CommunityCensusDataImportTemplate(AuthenticatedAPIView):
     def get(self, request):
         """Download CSV template with sample data from file"""
         try:
-            # Read from static/templates directory
-            import os
-            from django.conf import settings
-            
-            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'community_census_data_template.csv')
-            if os.path.exists(template_path):
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    csv_content = f.read()
-            else:
+            csv_content = _load_community_csv_template('community_census_data_template.csv')
+            if not csv_content:
                 raise FileNotFoundError("Template file not found")
                 
-        except Exception as e:
+        except Exception:
             # Fallback to hardcoded template if file not found
             import csv
             import io
             
             headers = [
-                'community_name', 'census_year', 'population', 'tier',
+                'community_id', 'community_name', 'census_year', 'population', 'tier',
                 'region', 'zone', 'province', 'is_active',
                 'start_date', 'end_date'
             ]
             sample_data = [
-                ['Toronto', '2030', '2930000', 'Tier 1', 'Central', 'Zone A', 'Ontario', 'true', '2030-01-01T00:00:00', ''],
-                ['Vancouver', '2030', '675218', 'Tier 1', 'West', 'Zone B', 'British Columbia', 'true', '2030-01-01T00:00:00', ''],
-                ['Montreal', '2030', '1762949', 'Tier 1', 'East', 'Zone C', 'Quebec', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Toronto', '2030', '2930000', 'Tier 1', 'Central', 'Zone A', 'Ontario', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Vancouver', '2030', '675218', 'Tier 1', 'West', 'Zone B', 'British Columbia', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Montreal', '2030', '1762949', 'Tier 1', 'East', 'Zone C', 'Quebec', 'true', '2030-01-01T00:00:00', ''],
             ]
             
             output = io.StringIO()

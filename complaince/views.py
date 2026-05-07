@@ -19,10 +19,32 @@ from community.models import (
 )
 from .models import ComplianceCalculation
 from .serializers import ComplianceCalculationSerializer
+from .utils import compliance_rate_db_expression, compliance_rate_percentage
 
 
 class AuthenticatedAPIView(APIView):
     permission_classes = [IsAuthenticated]
+
+
+def _request_sort_param(query_params, default='name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
+def _mapped_sort(value, allowed, default):
+    raw = str(value or default).strip()
+    descending = raw.startswith('-')
+    key = raw[1:] if descending else raw
+    mapped = allowed.get(key, allowed.get(raw, default))
+    if isinstance(mapped, str) and mapped.startswith('-'):
+        return mapped
+    return f'-{mapped}' if descending else mapped
 
 
 def _resolve_adjacent_allocation_census_year(census_year_id, year_value):
@@ -137,7 +159,25 @@ def filter_compliance_calculation_queryset(request):
         elif status_filter == 'excess':
             calculations = calculations.filter(excess__gt=0)
 
-    ordering = request.query_params.get('ordering', '-created_at')
+    ordering = _mapped_sort(
+        _request_sort_param(request.query_params, '-created_at'),
+        {
+            'created_at': 'created_at',
+            'compliance_rate': 'compliance_rate',
+            'shortfall': 'shortfall',
+            'excess': 'excess',
+            'required_sites': 'required_sites',
+            'actual_sites': 'actual_sites',
+            'community__name': 'community__name',
+            'community_name': 'community__name',
+            'name': 'community__name',
+            'census_year__year': 'census_year__year',
+            'census_year': 'census_year__year',
+            'year': 'census_year__year',
+            'program': 'program',
+        },
+        '-created_at',
+    )
     calculations = calculations.order_by(ordering)
     return calculations
 
@@ -161,7 +201,12 @@ class ComplianceCalculationListCreate(AuthenticatedAPIView):
             compliant_communities = calculations.filter(shortfall=0, excess=0).count()
             total_shortfall = calculations.aggregate(total=Sum('shortfall'))['total'] or 0
             total_excess = calculations.aggregate(total=Sum('excess'))['total'] or 0
-            overall_rate = calculations.aggregate(avg=Avg('compliance_rate'))['avg'] or 0
+            overall_rate = (
+                calculations.annotate(_avg_cr=compliance_rate_db_expression())
+                .aggregate(avg=Avg('_avg_cr'))['avg']
+                or 0
+            )
+            overall_rate = round(float(overall_rate), 2)
             total_sites = calculations.aggregate(total=Sum('actual_sites'))['total'] or 0
         
         # Pagination
@@ -176,7 +221,7 @@ class ComplianceCalculationListCreate(AuthenticatedAPIView):
                     'compliant_communities': compliant_communities,
                     'shortfalls': total_shortfall,
                     'excesses': total_excess,
-                    'overall_rate': round(overall_rate, 2) if overall_rate else 0,
+                    'overall_rate': overall_rate if overall_rate else 0,
                     'total_sites': total_sites
                 }
             return Response(response_data)
@@ -299,7 +344,7 @@ class ComplianceCalculationExportView(AuthenticatedAPIView):
                     c.actual_sites,
                     c.shortfall,
                     c.excess,
-                    c.compliance_rate,
+                    compliance_rate_percentage(c.actual_sites or 0, c.required_sites or 0),
                     c.calculation_date.isoformat() if c.calculation_date else '',
                 ]
             )
@@ -519,7 +564,7 @@ class AdjacentAllocationListView(AuthenticatedAPIView):
         census_year_id = request.query_params.get('census_year_id')
         year_value = request.query_params.get('year')
         search = request.query_params.get('search')
-        ordering = request.query_params.get('ordering', 'name')
+        ordering = _request_sort_param(request.query_params, 'name')
         try:
             page = int(request.query_params.get('page', 1))
         except (TypeError, ValueError):
@@ -552,6 +597,13 @@ class AdjacentAllocationListView(AuthenticatedAPIView):
         field = PROGRAM_FIELD[program]
         non_reallocatable_ops = ['Municipal', 'First Nation/Indigenous', 'Regional District']
 
+        # Per-program reallocations have ``program`` set; legacy NULL-program rows
+        # are matched by the site's program flag for backwards compatibility.
+        program_realloc_filter = Q(program=program) | Q(
+            program__isnull=True,
+            **{f'site_census_data__{field}': True},
+        )
+
         # Communities that have compliance data, active census data, or reallocations
         # for this census year + program — so we never silently drop communities.
         community_ids_from_compliance = set(
@@ -562,20 +614,16 @@ class AdjacentAllocationListView(AuthenticatedAPIView):
             CommunityCensusData.objects.filter(census_year=census_year)
             .values_list('community_id', flat=True)
         )
-        realloc_filter = {
-            'census_year': census_year,
-            **{f'site_census_data__{field}': True},
-        }
         community_ids_from_realloc = set()
-        for fid, tid in SiteReallocation.objects.filter(**realloc_filter).values_list(
-            'from_community_id', 'to_community_id'
-        ):
+        for fid, tid in SiteReallocation.objects.filter(census_year=census_year).filter(
+            program_realloc_filter
+        ).values_list('from_community_id', 'to_community_id'):
             community_ids_from_realloc.add(fid)
             community_ids_from_realloc.add(tid)
 
-        realloc_qs = SiteReallocation.objects.filter(**realloc_filter).select_related(
-            'site_census_data__site', 'from_community', 'to_community'
-        )
+        realloc_qs = SiteReallocation.objects.filter(census_year=census_year).filter(
+            program_realloc_filter
+        ).select_related('site_census_data__site', 'from_community', 'to_community')
 
         relevant_ids = community_ids_from_compliance | community_ids_from_census | community_ids_from_realloc
 
@@ -872,7 +920,6 @@ class AdjacentAllocationDetailView(AuthenticatedAPIView):
         sc = realloc.site_census_data
         addr_parts = [sc.address_line_1, sc.address_city, sc.address_postal_code]
 
-        program = realloc.reason or ''
         program_field_map = {
             'Paint': 'program_paint',
             'Lighting': 'program_lights',
@@ -880,11 +927,13 @@ class AdjacentAllocationDetailView(AuthenticatedAPIView):
             'Pesticides': 'program_pesticides',
             'Fertilizers': 'program_fertilizers',
         }
-        detected_program = None
-        for prog, field in program_field_map.items():
-            if getattr(sc, field, False):
-                detected_program = prog
-                break
+        # Per-program rows store the program; legacy NULL rows infer from site flags.
+        detected_program = realloc.program
+        if not detected_program:
+            for prog, field in program_field_map.items():
+                if getattr(sc, field, False):
+                    detected_program = prog
+                    break
 
         all_reallocs_for_site = SiteReallocation.objects.filter(
             site_census_data=sc,
@@ -898,6 +947,7 @@ class AdjacentAllocationDetailView(AuthenticatedAPIView):
                 'from_community_id': str(r.from_community_id),
                 'to_community': r.to_community.name,
                 'to_community_id': str(r.to_community_id),
+                'program': r.program,
                 'reallocated_at': r.reallocated_at.isoformat(),
                 'reason': r.reason or '',
                 'created_by': str(r.created_by) if r.created_by else None,
@@ -921,7 +971,9 @@ class AdjacentAllocationDetailView(AuthenticatedAPIView):
                     'actual': calc.actual_sites,
                     'shortfall': calc.shortfall,
                     'excess': calc.excess,
-                    'compliance_rate': float(calc.compliance_rate or 0),
+                    'compliance_rate': compliance_rate_percentage(
+                        calc.actual_sites, calc.required_sites
+                    ),
                     'program': calc.program,
                 }
             return None

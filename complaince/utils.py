@@ -10,6 +10,41 @@ from sites.models import Site, SiteCensusData
 from .models import CommunityOffset, DirectServiceOffset
 
 
+def compliance_rate_percentage(actual_sites: int, required_sites: int) -> float:
+    """
+    Requirement coverage: ``(actual / required) * 100``.
+
+    Above 100 means excess capacity; below 100 means shortfall. Exactly 100 means the
+    requirement is met with no shortfall (may still be excess if actual > required).
+
+    When there is no positive requirement, returns 100.0 (vacuously satisfied for reporting).
+    """
+    req = int(required_sites or 0)
+    act = int(actual_sites or 0)
+    if req > 0:
+        return round((act / req) * 100.0, 2)
+    return 100.0
+
+
+def compliance_rate_db_expression():
+    """ORM expression matching ``compliance_rate_percentage`` (for SQL aggregates)."""
+    from django.db.models import Case, When, Value, FloatField, F
+    from django.db.models.functions import Cast
+
+    return Case(
+        When(
+            required_sites__gt=0,
+            then=(
+                Cast(F('actual_sites'), FloatField())
+                / Cast(F('required_sites'), FloatField())
+            )
+            * Value(100.0),
+        ),
+        default=Value(100.0),
+        output_field=FloatField(),
+    )
+
+
 def calculate_required_sites_from_rule(
     community: Community,
     program: str,
@@ -253,10 +288,19 @@ def calculate_required_sites_with_offset(
 
 def count_actual_sites(community: Community, program: str, census_year: Optional[CensusYear] = None) -> int:
     """
-    Count actual active NON-EVENT sites for a community and program in a specific census year.
+    Count actual active NON-EVENT sites that count toward ``community`` for ``program``.
 
-    SiteCensusData.community is always kept in sync with reallocations (reallocate()
-    moves the FK, undo reverts it), so a simple filter is the source of truth.
+    Reallocation is per-program (``SiteReallocation.program``) and never moves
+    ``SiteCensusData.community``. So a site that originally lives in community A
+    with paint+lights enabled, and that has its **paint** reallocated to B,
+    still counts toward A for lights and toward B for paint.
+
+    Formula::
+
+        count(X, P) =
+              count(SiteCensusData.community == X AND program_P == True)
+            - count(SiteReallocation from X for P)        # P moved away from X
+            + count(SiteReallocation to   X for P)        # P moved into X
     """
     program_field_map = {
         'Paint': 'program_paint',
@@ -277,16 +321,35 @@ def count_actual_sites(community: Community, program: str, census_year: Optional
         else:
             return 0
 
-    queryset = SiteCensusData.objects.filter(
+    base_qs = SiteCensusData.objects.filter(
         community=community,
         census_year=census_year,
         is_active=True,
         **{program_field: True}
+    ).exclude(site_type='Event')
+    base_count = base_qs.count()
+
+    # Per-program reallocations adjust ownership without moving the FK.
+    # Legacy NULL-program rows (pre-migration) are matched by the related
+    # site's program flag for backwards compatibility.
+    from sites.models import SiteReallocation
+
+    program_match = Q(program=program) | Q(
+        program__isnull=True,
+        **{f'site_census_data__{program_field}': True},
     )
 
-    # Tool B: Events are handled separately and capped by regulatory percentage.
-    queryset = queryset.exclude(site_type='Event')
-    return queryset.count()
+    outbound = SiteReallocation.objects.filter(
+        from_community=community,
+        census_year=census_year,
+    ).filter(program_match).count()
+
+    inbound = SiteReallocation.objects.filter(
+        to_community=community,
+        census_year=census_year,
+    ).filter(program_match).count()
+
+    return max(0, base_count - outbound + inbound)
 
 
 def get_event_offset_percentage_cap(census_year: CensusYear, program: str) -> int:
@@ -432,7 +495,7 @@ def calculate_compliance(
         - actual_sites: int
         - shortfall: int (0 if compliant)
         - excess: int (0 if not compliant)
-        - compliance_rate: float (percentage)
+        - compliance_rate: float (coverage % = actual/required*100; may exceed 100 when excess)
     """
     # Zero metrics to return when inactive
     zero_metrics = {
@@ -491,8 +554,9 @@ def calculate_compliance(
     base_required_sites = req_detail['base_required_sites']
     final_required_sites = req_detail['required_sites']
 
-    # Adjacent reallocations: already reflected in SiteCensusData.community (we move the FK on reallocate()).
-    # Keep a count for reporting only.
+    # Adjacent reallocations: counted per-program from SiteReallocation.program.
+    # Reallocation does NOT move SiteCensusData.community; count_actual_sites
+    # below handles the per-program FK adjustment.
     from sites.models import SiteReallocation
     program_field_map = {
         'Paint': 'program_paint',
@@ -507,7 +571,10 @@ def calculate_compliance(
         to_community=community,
     )
     if program_field:
-        sites_from_adjacent_qs = sites_from_adjacent_qs.filter(**{f'site_census_data__{program_field}': True})
+        sites_from_adjacent_qs = sites_from_adjacent_qs.filter(
+            Q(program=program)
+            | Q(program__isnull=True, **{f'site_census_data__{program_field}': True})
+        )
     sites_from_adjacent = sites_from_adjacent_qs.count()
 
     # Tool B: Events can offset shortfall up to regulatory % of required sites.
@@ -534,10 +601,7 @@ def calculate_compliance(
     shortfall = max(0, required_sites - actual_sites)
     excess = max(0, actual_sites - required_sites)
 
-    if required_sites > 0:
-        compliance_rate = min(100.0, (actual_sites / required_sites) * 100)
-    else:
-        compliance_rate = 100.0 if actual_sites == 0 else 100.0
+    compliance_rate = compliance_rate_percentage(actual_sites, required_sites)
 
     return {
         'required_sites': required_sites,

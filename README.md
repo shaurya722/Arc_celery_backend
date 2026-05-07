@@ -252,8 +252,16 @@ This distributes tasks across workers. Increase concurrency or add more workers 
 
 #### 4. Start Celery Beat (Scheduler)
 ```bash
-celery -A arc_backend beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+celery -A arc_backend beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler --logfile=celery_beat.log
 ```
+
+With **DatabaseScheduler**, Beat only runs tasks that exist as rows in **django-celery-beat** (not from `settings`). Install the expiry job once per database:
+
+```bash
+python manage.py ensure_check_expiry_beat
+```
+
+Then confirm in Django Admin > **Periodic tasks** that `check-expiry (sites & rules expiry)` is **enabled**. **Beat does not execute tasks** - you still need at least one **Celery worker** running to process `check_expiry`.
 
 #### 5. (Optional) Start Flower for Monitoring
 ```bash

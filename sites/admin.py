@@ -22,6 +22,7 @@ class SiteReallocationInline(admin.TabularInline):
         'from_community',
         'to_community',
         'census_year',
+        'program',
         'reallocated_at',
         'created_by',
         'reason',
@@ -75,6 +76,7 @@ class SiteReallocationAdmin(admin.ModelAdmin):
         'id_short',
         'site_name',
         'site_census_id',
+        'program',
         'from_community',
         'to_community',
         'census_year',
@@ -82,7 +84,7 @@ class SiteReallocationAdmin(admin.ModelAdmin):
         'reallocated_at',
         'created_by',
     ]
-    list_filter = ['census_year', 'from_community', 'to_community', 'created_by']
+    list_filter = ['census_year', 'program', 'from_community', 'to_community', 'created_by']
     search_fields = [
         'id',
         'site_census_data__site__site_name',
@@ -106,6 +108,7 @@ class SiteReallocationAdmin(admin.ModelAdmin):
             'fields': (
                 'id',
                 'site_census_data',
+                'program',
                 'from_community',
                 'to_community',
                 'census_year',

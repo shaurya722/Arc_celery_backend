@@ -17,35 +17,44 @@ from .models import SiteCensusData, SiteReallocation
 @receiver(post_delete, sender=SiteReallocation)
 def sync_site_community_after_reallocation_delete(sender, instance, **kwargs):
     """
-    If a SiteReallocation row is removed (admin delete, raw SQL, etc.), move
-    SiteCensusData.community back to the logical home so inbound caps and listings
-    stay consistent. Matches SiteReallocationService.undo_reallocation behaviour.
+    If a SiteReallocation row is removed (admin delete, raw SQL, etc.), refresh
+    compliance for the affected communities and program. The site's
+    ``community`` FK is NOT touched: per-program reallocation never moved it.
     """
     try:
         sc = SiteCensusData.objects.get(pk=instance.site_census_data_id)
     except SiteCensusData.DoesNotExist:
         return
 
-    prev = sc.reallocations.order_by('-reallocated_at').first()
-    revert_to = prev.to_community if prev else instance.from_community
-    if sc.community_id != revert_to.id:
-        sc.community = revert_to
-        sc.save(update_fields=['community'])
+    _refresh_compliance_after_reallocation_change(
+        sc,
+        instance.from_community_id,
+        instance.to_community_id,
+        program=instance.program,
+    )
 
-    _refresh_compliance_after_reallocation_change(sc, instance.from_community_id, instance.to_community_id)
 
+def _refresh_compliance_after_reallocation_change(
+    site_census_data, from_community_id, to_community_id, program=None
+):
+    """Persist ComplianceCalculation for communities affected by a reallocation change.
 
-def _refresh_compliance_after_reallocation_change(site_census_data, from_community_id, to_community_id):
-    """Persist ComplianceCalculation for communities affected by a reallocation change."""
+    When ``program`` is provided (per-program SiteReallocation row) we only
+    recompute that program. For legacy NULL-program rows we fall back to
+    recomputing every program the site participates in.
+    """
     from community.models import Community
     from complaince.models import ComplianceCalculation
     from complaince.utils import calculate_compliance
     from sites.adjacent_reallocation import PROGRAM_FIELD
 
     cy = site_census_data.census_year
-    programs = [p for p, f in PROGRAM_FIELD.items() if getattr(site_census_data, f, False)]
-    if not programs:
-        programs = list(PROGRAM_FIELD.keys())
+    if program:
+        programs = [program]
+    else:
+        programs = [p for p, f in PROGRAM_FIELD.items() if getattr(site_census_data, f, False)]
+        if not programs:
+            programs = list(PROGRAM_FIELD.keys())
 
     for cid in {from_community_id, to_community_id}:
         if not cid:
@@ -54,11 +63,11 @@ def _refresh_compliance_after_reallocation_change(site_census_data, from_communi
             community = Community.objects.get(pk=cid)
         except Community.DoesNotExist:
             continue
-        for program in programs:
-            metrics = calculate_compliance(community, program, cy)
+        for prog in programs:
+            metrics = calculate_compliance(community, prog, cy)
             ComplianceCalculation.objects.update_or_create(
                 community=community,
-                program=program,
+                program=prog,
                 census_year=cy,
                 defaults={
                     'required_sites': metrics['required_sites'],
