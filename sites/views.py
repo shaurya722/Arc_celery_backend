@@ -1,4 +1,5 @@
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
@@ -21,6 +22,162 @@ from uuid import UUID
 from django.utils import timezone
 
 
+def _request_sort_param(query_params, default='name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
+def _mapped_sort(value, allowed, default):
+    raw = str(value or default).strip()
+    descending = raw.startswith('-')
+    key = raw[1:] if descending else raw
+    mapped = allowed.get(key, allowed.get(raw, default))
+    if isinstance(mapped, str) and mapped.startswith('-'):
+        return mapped
+    return f'-{mapped}' if descending else mapped
+
+
+def filter_site_census_queryset(queryset, query_params):
+    """
+    Apply the same filters as ``SiteListCreate`` GET (search, year, site_type, etc.).
+    ``query_params`` may be ``request.query_params`` or any dict-like mapping.
+    """
+    qp = query_params
+
+    search = qp.get('search', None)
+    if search:
+        queryset = queryset.filter(
+            Q(site__site_name__icontains=search) |
+            Q(address_city__icontains=search)
+        )
+
+    year = qp.get('year', None) or qp.get('census_year', None)
+    if year:
+        queryset = queryset.filter(census_year__year=year)
+
+    site_type = qp.get('site_type', None)
+    if site_type:
+        queryset = queryset.filter(site_type=site_type)
+
+    operator_type = qp.get('operator_type', None)
+    if operator_type:
+        queryset = queryset.filter(operator_type=operator_type)
+
+    communities = qp.get('communities', None)
+    if communities:
+        if isinstance(communities, str):
+            community_ids = [item.strip() for item in communities.split(',') if item.strip()]
+        elif isinstance(communities, list):
+            community_ids = communities
+        else:
+            community_ids = [str(communities)]
+        if community_ids:
+            queryset = queryset.filter(community__id__in=community_ids)
+
+    community = qp.get('community', None)
+    if community:
+        queryset = queryset.filter(community__id=community)
+
+    region = qp.get('region', None)
+    if region:
+        queryset = queryset.filter(region=region)
+
+    is_active = qp.get('is_active', None)
+    if is_active:
+        is_active_bool = str(is_active).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(is_active=is_active_bool)
+
+    material_paint = qp.get('material_paint', None)
+    if material_paint:
+        material_paint_bool = str(material_paint).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_paint=material_paint_bool)
+
+    material_light_bulbs = qp.get('material_light_bulbs', None)
+    if material_light_bulbs:
+        material_light_bulbs_bool = str(material_light_bulbs).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_light_bulbs=material_light_bulbs_bool)
+
+    material_batteries = qp.get('material_batteries', None)
+    if material_batteries:
+        material_batteries_bool = str(material_batteries).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_batteries=material_batteries_bool)
+
+    material_oil_filters = qp.get('material_oil_filters', None)
+    if material_oil_filters:
+        material_oil_filters_bool = str(material_oil_filters).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_oil_filters=material_oil_filters_bool)
+
+    material_tires = qp.get('material_tires', None)
+    if material_tires:
+        material_tires_bool = str(material_tires).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_tires=material_tires_bool)
+
+    material_electronics = qp.get('material_electronics', None)
+    if material_electronics:
+        material_electronics_bool = str(material_electronics).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_electronics=material_electronics_bool)
+
+    material_household_hazardous_waste = qp.get('material_household_hazardous_waste', None)
+    if material_household_hazardous_waste:
+        material_household_hazardous_waste_bool = str(material_household_hazardous_waste).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(material_household_hazardous_waste=material_household_hazardous_waste_bool)
+
+    sector_residential = qp.get('sector_residential', None)
+    if sector_residential:
+        sector_residential_bool = str(sector_residential).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(sector_residential=sector_residential_bool)
+
+    sector_commercial = qp.get('sector_commercial', None)
+    if sector_commercial:
+        sector_commercial_bool = str(sector_commercial).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(sector_commercial=sector_commercial_bool)
+
+    sector_industrial = qp.get('sector_industrial', None)
+    if sector_industrial:
+        sector_industrial_bool = str(sector_industrial).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(sector_industrial=sector_industrial_bool)
+
+    sector_institutional = qp.get('sector_institutional', None)
+    if sector_institutional:
+        sector_institutional_bool = str(sector_institutional).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(sector_institutional=sector_institutional_bool)
+
+    sort = _mapped_sort(
+        _request_sort_param(qp, 'site__site_name'),
+        {
+            'id': 'id',
+            'site_name': 'site__site_name',
+            'name': 'site__site_name',
+            'site__site_name': 'site__site_name',
+            'community_name': 'community__name',
+            'community__name': 'community__name',
+            'census_year': 'census_year__year',
+            'census_year_value': 'census_year__year',
+            'year': 'census_year__year',
+            'site_type': 'site_type',
+            'operator_type': 'operator_type',
+            'is_active': 'is_active',
+            'site_start_date': 'site_start_date',
+            'site_end_date': 'site_end_date',
+            'created_at': 'created_at',
+            'updated_at': 'updated_at',
+        },
+        'site__site_name',
+    )
+    queryset = queryset.order_by(sort)
+    return queryset
+
+
+class AuthenticatedAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+
 class SitePagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'limit'
@@ -28,7 +185,7 @@ class SitePagination(PageNumberPagination):
     max_page_size = 100
 
 
-class SiteListCreate(APIView):
+class SiteListCreate(AuthenticatedAPIView):
     """
     API for Site census data in flat format.
     Returns all site census data records with site and community information.
@@ -36,103 +193,8 @@ class SiteListCreate(APIView):
     pagination_class = SitePagination()
 
     def get(self, request):
-        # Query SiteCensusData instead of Site for flat format
         queryset = SiteCensusData.objects.select_related('site', 'census_year', 'community').all()
-
-        # Search by site name
-        search = request.query_params.get('search', None)
-        if search:
-            queryset = queryset.filter(
-                Q(site__site_name__icontains=search) |
-                Q(address_city__icontains=search)
-            )
-
-        # Filters
-        year = request.query_params.get('year', None)
-        if year:
-            queryset = queryset.filter(census_year__year=year)
-
-        site_type = request.query_params.get('site_type', None)
-        if site_type:
-            queryset = queryset.filter(site_type=site_type)
-
-        operator_type = request.query_params.get('operator_type', None)
-        if operator_type:
-            queryset = queryset.filter(operator_type=operator_type)
-
-        community = request.query_params.get('community', None)
-        if community:
-            queryset = queryset.filter(community__id=community)
-
-        region = request.query_params.get('region', None)
-        if region:
-            queryset = queryset.filter(region=region)
-
-        is_active = request.query_params.get('is_active', None)
-        if is_active:
-            is_active_bool = is_active.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(is_active=is_active_bool)
-
-        # Material services filters
-        material_paint = request.query_params.get('material_paint', None)
-        if material_paint:
-            material_paint_bool = material_paint.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_paint=material_paint_bool)
-
-        material_light_bulbs = request.query_params.get('material_light_bulbs', None)
-        if material_light_bulbs:
-            material_light_bulbs_bool = material_light_bulbs.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_light_bulbs=material_light_bulbs_bool)
-
-        material_batteries = request.query_params.get('material_batteries', None)
-        if material_batteries:
-            material_batteries_bool = material_batteries.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_batteries=material_batteries_bool)
-
-        material_oil_filters = request.query_params.get('material_oil_filters', None)
-        if material_oil_filters:
-            material_oil_filters_bool = material_oil_filters.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_oil_filters=material_oil_filters_bool)
-
-        material_tires = request.query_params.get('material_tires', None)
-        if material_tires:
-            material_tires_bool = material_tires.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_tires=material_tires_bool)
-
-        material_electronics = request.query_params.get('material_electronics', None)
-        if material_electronics:
-            material_electronics_bool = material_electronics.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_electronics=material_electronics_bool)
-
-        material_household_hazardous_waste = request.query_params.get('material_household_hazardous_waste', None)
-        if material_household_hazardous_waste:
-            material_household_hazardous_waste_bool = material_household_hazardous_waste.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(material_household_hazardous_waste=material_household_hazardous_waste_bool)
-
-        # Collection sectors filters
-        sector_residential = request.query_params.get('sector_residential', None)
-        if sector_residential:
-            sector_residential_bool = sector_residential.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(sector_residential=sector_residential_bool)
-
-        sector_commercial = request.query_params.get('sector_commercial', None)
-        if sector_commercial:
-            sector_commercial_bool = sector_commercial.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(sector_commercial=sector_commercial_bool)
-
-        sector_industrial = request.query_params.get('sector_industrial', None)
-        if sector_industrial:
-            sector_industrial_bool = sector_industrial.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(sector_industrial=sector_industrial_bool)
-
-        sector_institutional = request.query_params.get('sector_institutional', None)
-        if sector_institutional:
-            sector_institutional_bool = sector_institutional.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(sector_institutional=sector_institutional_bool)
-
-        # Sort
-        sort = request.query_params.get('sort', 'site__site_name')
-        queryset = queryset.order_by(sort)
+        queryset = filter_site_census_queryset(queryset, request.query_params)
 
         # Pagination
         paginator = self.pagination_class
@@ -158,7 +220,7 @@ class SiteListCreate(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class SiteDetail(APIView):
+class SiteDetail(AuthenticatedAPIView):
     """CRUD operations for single site census data record"""
     
     def get_object(self, pk):
@@ -195,7 +257,37 @@ class SiteDetail(APIView):
         return Response({"message": "Site census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
-class SiteApproveEvents(APIView):
+class SiteBulkDelete(AuthenticatedAPIView):
+    """Bulk delete SiteCensusData records by IDs"""
+
+    def post(self, request):
+        ids = request.data.get('ids')
+        if not isinstance(ids, list) or not ids:
+            return Response({
+                'error': 'Provide a non-empty list of ids to delete.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Ensure all ids are integers
+        try:
+            id_list = [int(x) for x in ids]
+        except (TypeError, ValueError):
+            return Response({
+                'error': 'All ids must be integers.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = SiteCensusData.objects.filter(id__in=id_list)
+        found_ids = list(qs.values_list('id', flat=True))
+        deleted_count, _ = qs.delete()
+
+        return Response({
+            'requested_count': len(id_list),
+            'deleted_count': deleted_count,
+            'deleted_ids': found_ids,
+            'not_found_ids': [i for i in id_list if i not in found_ids],
+        }, status=status.HTTP_200_OK)
+
+
+class SiteApproveEvents(AuthenticatedAPIView):
     """
     API for approving multiple Event sites.
     Accepts a list of site census data IDs and sets event_approved=True and is_active=True for Event sites.
@@ -268,7 +360,7 @@ class SiteApproveEvents(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class EventListing(APIView):
+class EventListing(AuthenticatedAPIView):
     """
     API for Event Listing - shows communities with event shortfall, their associated events,
     and compliance data (shortfall, applied_event, available_event) for a specific census year.
@@ -411,13 +503,27 @@ class EventListing(APIView):
         if search:
             result = [item for item in result if search.lower() in item['community']['name'].lower()]
 
+        sort = _request_sort_param(request.query_params, 'community_name')
+        reverse = str(sort).startswith('-')
+        sort_key = str(sort)[1:] if reverse else str(sort)
+        event_sort_map = {
+            'name': lambda item: item['community']['name'].lower(),
+            'community_name': lambda item: item['community']['name'].lower(),
+            'shortfall': lambda item: item.get('shortfall', 0),
+            'applied_event': lambda item: item.get('applied_event', 0),
+            'available_event': lambda item: item.get('availabel_event', 0),
+            'availabel_event': lambda item: item.get('availabel_event', 0),
+            'events_count': lambda item: len(item.get('Events', [])),
+        }
+        result.sort(key=event_sort_map.get(sort_key, event_sort_map['community_name']), reverse=reverse)
+
         # Pagination
         paginator = self.pagination_class
         paginated_result = paginator.paginate_queryset(result, request)
         return paginator.get_paginated_response(paginated_result)
 
 
-class SiteCensusDataImportExport(APIView):
+class SiteCensusDataImportExport(AuthenticatedAPIView):
     """
     API for importing and exporting SiteCensusData via CSV.
     
@@ -427,6 +533,7 @@ class SiteCensusDataImportExport(APIView):
     
     # Expected CSV headers
     CSV_HEADERS = [
+        'id',
         'site_name', 'census_year', 'community_name', 'site_type', 'operator_type', 'service_partner',
         'address_line_1', 'address_line_2', 'address_city', 'address_postal_code', 'region', 'service_area',
         'address_latitude', 'address_longitude', 'latitude', 'longitude', 'is_active', 'event_approved',
@@ -539,20 +646,9 @@ class SiteCensusDataImportExport(APIView):
         return Response(response_data, status=status.HTTP_200_OK)
     
     def get(self, request):
-        """Export SiteCensusData to CSV (optional filter by census_year)"""
-        census_year_filter = request.GET.get('census_year')
-        
+        """Export SiteCensusData to CSV using the same query filters as ``SiteListCreate`` GET."""
         queryset = SiteCensusData.objects.select_related('site', 'census_year', 'community').all()
-        
-        if census_year_filter:
-            try:
-                year = int(census_year_filter)
-                queryset = queryset.filter(census_year__year=year)
-            except ValueError:
-                return Response(
-                    {'error': f'Invalid census year: {census_year_filter}'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        queryset = filter_site_census_queryset(queryset, request.query_params)
         
         # Create CSV response
         output = io.StringIO()
@@ -564,6 +660,7 @@ class SiteCensusDataImportExport(APIView):
         # Write data rows
         for data in queryset:
             row = [
+                data.pk,
                 data.site.site_name,
                 data.census_year.year,
                 data.community.name if data.community else '',
@@ -700,6 +797,17 @@ class SiteCensusDataImportExport(APIView):
                     errors.append({'row': row_number, 'field': 'census_year', 'error': f'Census year {year} does not exist'})
             except ValueError:
                 pass
+
+        row_id = (row.get('id') or row.get('site_census_data_id') or '').strip()
+        if row_id:
+            try:
+                pk = int(row_id)
+                if pk < 1:
+                    errors.append({'row': row_number, 'field': 'id', 'error': 'id must be a positive integer'})
+                elif not SiteCensusData.objects.filter(pk=pk).exists():
+                    errors.append({'row': row_number, 'field': 'id', 'error': f'Site census data id {pk} does not exist'})
+            except ValueError:
+                errors.append({'row': row_number, 'field': 'id', 'error': f'Invalid id: {row_id}'})
         
         return errors
     
@@ -748,12 +856,14 @@ class SiteCensusDataImportExport(APIView):
             except ValueError:
                 return None
         
-        # Check if record exists
-        existing = SiteCensusData.objects.filter(
-            site=site,
-            census_year=census_year_obj
-        ).first()
-        
+        row_id = (row.get('id') or row.get('site_census_data_id') or '').strip()
+        existing = None
+        if row_id:
+            try:
+                existing = SiteCensusData.objects.filter(pk=int(row_id)).first()
+            except ValueError:
+                existing = None
+
         data = {
             'site': site,
             'census_year': census_year_obj,
@@ -793,18 +903,29 @@ class SiteCensusDataImportExport(APIView):
         }
         
         if existing:
-            # Update existing record
             for key, value in data.items():
                 setattr(existing, key, value)
             existing.save()
             return 'updated'
-        else:
-            # Create new record
-            SiteCensusData.objects.create(**data)
-            return 'created'
+        SiteCensusData.objects.create(**data)
+        return 'created'
 
 
-class SiteCensusDataImportTemplate(APIView):
+def _load_csv_import_template(filename: str) -> str | None:
+    """Prefer collected ``staticfiles/templates`` (user/deploy overrides), then ``static/templates``."""
+    import os
+
+    from django.conf import settings
+
+    for root in ('staticfiles', 'static'):
+        path = os.path.join(settings.BASE_DIR, root, 'templates', filename)
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+    return None
+
+
+class SiteCensusDataImportTemplate(AuthenticatedAPIView):
     """
     API to download a CSV template for importing SiteCensusData.
     """
@@ -812,19 +933,14 @@ class SiteCensusDataImportTemplate(APIView):
     def get(self, request):
         """Download CSV template with sample data from file"""
         try:
-            import os
-            from django.conf import settings
-            
-            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'site_census_data_template.csv')
-            if os.path.exists(template_path):
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    csv_content = f.read()
-            else:
+            csv_content = _load_csv_import_template('site_census_data_template.csv')
+            if not csv_content:
                 raise FileNotFoundError("Template file not found")
                 
         except Exception:
             # Fallback to hardcoded template
             headers = [
+                'id',
                 'site_name', 'census_year', 'community_name', 'site_type', 'operator_type', 'service_partner',
                 'address_line_1', 'address_line_2', 'address_city', 'address_postal_code', 'region', 'service_area',
                 'address_latitude', 'address_longitude', 'latitude', 'longitude', 'is_active', 'event_approved',
@@ -834,17 +950,17 @@ class SiteCensusDataImportTemplate(APIView):
                 'program_pesticides_end_date', 'program_fertilizers', 'program_fertilizers_start_date', 'program_fertilizers_end_date'
             ]
             sample_data = [
-                ['Sample Collection Site', '2030', 'Toronto', 'Collection Site', 'Retailer', 'Partner A',
+                ['', 'Sample Collection Site', '2030', 'Toronto', 'Collection Site', 'Retailer', 'Partner A',
                  '123 Main St', '', 'Toronto', 'M5V 3A8', 'Central', 'Downtown',
                  '43.6532', '-79.3832', '43.6532', '-79.3832', 'true', 'false',
                  '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '2030-12-31T23:59:59',
                  'true', '2030-01-01T00:00:00', '', 'false', '', '', 'false', '', '', 'false', '', ''],
-                ['Sample Event Site', '2030', 'Vancouver', 'Event', 'Municipal', '',
+                ['', 'Sample Event Site', '2030', 'Vancouver', 'Event', 'Municipal', '',
                  '456 Event Ave', 'Suite 100', 'Vancouver', 'V6B 1A1', 'West', 'Metro',
                  '49.2827', '-123.1207', '49.2827', '-123.1207', 'true', 'true',
                  '2030-06-01T00:00:00', '2030-06-30T23:59:59', 'true', '2030-06-01T00:00:00', '2030-06-30T23:59:59',
                  'false', '', '', 'true', '2030-06-01T00:00:00', '2030-06-30T23:59:59', 'false', '', '', 'false', '', ''],
-                ['Sample Depot', '2030', 'Montreal', 'Municipal Depot', 'Municipal', 'City Services',
+                ['', 'Sample Depot', '2030', 'Montreal', 'Municipal Depot', 'Municipal', 'City Services',
                  '789 Depot Rd', '', 'Montreal', 'H3A 0G4', 'East', 'City Center',
                  '45.5017', '-73.5673', '45.5017', '-73.5673', 'true', 'false',
                  '2030-01-01T00:00:00', '', 'true', '2030-01-01T00:00:00', '',
@@ -869,7 +985,7 @@ class SiteCensusDataImportTemplate(APIView):
         return response
 
 
-class ReallocateSiteAPIView(APIView):
+class ReallocateSiteAPIView(AuthenticatedAPIView):
     """
     API endpoint to reallocate a site from one community to an adjacent community.
     Uses service layer for business logic validation.
@@ -881,10 +997,12 @@ class ReallocateSiteAPIView(APIView):
         
         Request body:
         {
-            "site_census_id": "uuid",
-            "to_community_id": "uuid",
+            "site_census_id": "...",
+            "to_community_id": "...",
+            "program": "Paint",
             "reason": "optional reason"
         }
+        ``program`` is required when the site has more than one program flag enabled.
         """
         serializer = ReallocateSiteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -903,11 +1021,12 @@ class ReallocateSiteAPIView(APIView):
                 program=serializer.validated_data.get('program'),
             )
         except ValidationError as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+            payload = {'messages': [str(m) for m in e.messages]}
+            params = getattr(e, 'params', None)
+            if params:
+                payload['validation_context'] = params
+            return Response(payload, status=status.HTTP_400_BAD_REQUEST)
+
         # Return reallocation details
         reallocation_serializer = SiteReallocationSerializer(reallocation)
         return Response({
@@ -916,7 +1035,7 @@ class ReallocateSiteAPIView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
-class UndoReallocationAPIView(APIView):
+class UndoReallocationAPIView(AuthenticatedAPIView):
     """
     API endpoint to undo a site reallocation.
     """
@@ -938,7 +1057,7 @@ class UndoReallocationAPIView(APIView):
             )
 
 
-class ReallocationHistoryAPIView(APIView):
+class ReallocationHistoryAPIView(AuthenticatedAPIView):
     """
     API endpoint to get reallocation history for a site.
     """
@@ -967,7 +1086,7 @@ class ReallocationHistoryAPIView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class AdjacentCommunityAllocationView(APIView):
+class AdjacentCommunityAllocationView(AuthenticatedAPIView):
     """
     API endpoint to get adjacent communities with allocation information.
     Shows source community compliance and adjacent communities with their shortfalls/excesses.
@@ -1024,7 +1143,7 @@ class AdjacentCommunityAllocationView(APIView):
         return Response(allocation_data, status=status.HTTP_200_OK)
 
 
-class AdjacentCommunityListCreate(APIView):
+class AdjacentCommunityListCreate(AuthenticatedAPIView):
     """
     API endpoint to manage adjacent community relationships.
     """
@@ -1133,7 +1252,7 @@ class AdjacentCommunityListCreate(APIView):
         }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
-class ExcessReallocationOverviewView(APIView):
+class ExcessReallocationOverviewView(AuthenticatedAPIView):
     """
     API endpoint to list communities with excess capacity, their adjacent communities
     with shortfalls, and how many sites have been reallocated.
@@ -1184,7 +1303,7 @@ class ExcessReallocationOverviewView(APIView):
         )
 
 
-class MapAdjacentReallocationOverviewView(APIView):
+class MapAdjacentReallocationOverviewView(AuthenticatedAPIView):
     """
     Tool C: adjacent reallocation using map-drawn Community.adjacent plus legacy
     AdjacentCommunity, with census_year and per-program regulatory cap on inbound sites.
@@ -1258,7 +1377,7 @@ class MapAdjacentReallocationOverviewView(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
-class ToolCAdjacentReallocationListView(APIView):
+class ToolCAdjacentReallocationListView(AuthenticatedAPIView):
     """
     GET listing for Tool C UI: excess communities, eligible sites, adjacent shortfalls,
     pagination and search (matches frontend getAdjacentReallocations).
@@ -1269,7 +1388,7 @@ class ToolCAdjacentReallocationListView(APIView):
         census_year_id = request.query_params.get('census_year_id')
         year_value = request.query_params.get('year')
         search = request.query_params.get('search')
-        ordering = request.query_params.get('ordering', 'name')
+        ordering = _request_sort_param(request.query_params, 'name')
 
         try:
             page = int(request.query_params.get('page', 1))

@@ -1,5 +1,11 @@
+import csv
+import io
+from datetime import datetime
+
+from django.http import HttpResponse
 from rest_framework.views import APIView
 # APIView provides the base class for API views in Django REST Framework
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 # Response is used to return HTTP responses with data
 from rest_framework import status
@@ -15,13 +21,94 @@ from .models import RegulatoryRuleCensusData
 from .serializers import RegulatoryRuleCensusDataSerializer
 # Importing serializers for data validation and conversion
 
+
+def filter_regulatory_rule_census_queryset(queryset, query_params):
+    """
+    Same filters and ordering as ``RegulatoryRuleListCreate.get``.
+    ``query_params`` may be ``request.query_params`` or any dict-like mapping.
+    """
+    qp = query_params
+
+    search_query = qp.get('search', '') or qp.get('search_query', '')
+    if search_query:
+        queryset = queryset.filter(
+            Q(regulatory_rule__name__icontains=search_query)
+            | Q(description__icontains=search_query)
+        )
+
+    year = qp.get('year') or qp.get('census_year')
+    if year:
+        queryset = queryset.filter(census_year__year=year)
+
+    census_year_id = qp.get('census_year_id')
+    if census_year_id not in (None, ''):
+        try:
+            queryset = queryset.filter(census_year_id=int(census_year_id))
+        except (TypeError, ValueError):
+            pass
+
+    program = qp.get('program')
+    if program:
+        queryset = queryset.filter(program=program)
+
+    category = qp.get('category')
+    if category:
+        queryset = queryset.filter(category=category)
+
+    rule_type = qp.get('rule_type')
+    if rule_type:
+        queryset = queryset.filter(rule_type=rule_type)
+
+    is_active = qp.get('is_active')
+    if is_active is not None and str(is_active).strip() != '':
+        is_active_bool = str(is_active).lower() in ('true', '1', 'yes')
+        queryset = queryset.filter(is_active=is_active_bool)
+
+    sort_by = qp.get('sort', '-census_year__year')
+    valid_sort_fields = {
+        'census_year__year': 'census_year__year',
+        '-census_year__year': '-census_year__year',
+        'program': 'program',
+        '-program': '-program',
+        'category': 'category',
+        '-category': '-category',
+        'rule_type': 'rule_type',
+        '-rule_type': '-rule_type',
+        'is_active': 'is_active',
+        '-is_active': '-is_active',
+        'created_at': 'created_at',
+        '-created_at': '-created_at',
+        'updated_at': 'updated_at',
+        '-updated_at': '-updated_at',
+        'min_population': 'min_population',
+        '-min_population': '-min_population',
+        'max_population': 'max_population',
+        '-max_population': '-max_population',
+        'site_per_population': 'site_per_population',
+        '-site_per_population': '-site_per_population',
+        'base_required_sites': 'base_required_sites',
+        '-base_required_sites': '-base_required_sites',
+        'name': 'regulatory_rule__name',
+        '-name': '-regulatory_rule__name',
+        'description': 'description',
+        '-description': '-description',
+    }
+    sort_field = valid_sort_fields.get(sort_by, '-census_year__year')
+    queryset = queryset.order_by(sort_field)
+    return queryset
+
+
+class AuthenticatedAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+
 class RegulatoryRulePagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'limit'
     page_query_param = 'page'
     max_page_size = 100
 
-class RegulatoryRuleListCreate(APIView):
+class RegulatoryRuleListCreate(AuthenticatedAPIView):
     """
     APIView for listing all RegulatoryRuleCensusData and creating new ones.
     
@@ -30,86 +117,13 @@ class RegulatoryRuleListCreate(APIView):
     """
     pagination_class = RegulatoryRulePagination()
     def get(self, request):
-        # Retrieve all RegulatoryRuleCensusData instances initially
         queryset = RegulatoryRuleCensusData.objects.select_related('regulatory_rule', 'census_year').all()
+        queryset = filter_regulatory_rule_census_queryset(queryset, request.query_params)
 
-        # Search functionality
-        search_query = request.GET.get('search', '')
-        if search_query:
-            queryset = queryset.filter(
-                Q(regulatory_rule__name__icontains=search_query) |
-                Q(description__icontains=search_query)
-            )
-
-        # Filters
-        year = request.GET.get('year')
-        if year:
-            queryset = queryset.filter(census_year__year=year)
-
-        program = request.GET.get('program')
-        if program:
-            queryset = queryset.filter(program=program)
-
-        category = request.GET.get('category')
-        if category:
-            queryset = queryset.filter(category=category)
-
-        rule_type = request.GET.get('rule_type')
-        if rule_type:
-            queryset = queryset.filter(rule_type=rule_type)
-
-        is_active = request.GET.get('is_active')
-        if is_active is not None:
-            is_active_bool = is_active.lower() in ('true', '1', 'yes')
-            queryset = queryset.filter(is_active=is_active_bool)
-
-        # Sorting - handle valid field names
-        sort_by = request.GET.get('sort', '-census_year__year')  # Default sort by census year descending
-        
-        # Map of allowed sort fields to prevent FieldError
-        valid_sort_fields = {
-            'census_year__year': 'census_year__year',
-            '-census_year__year': '-census_year__year',
-            'program': 'program',
-            '-program': '-program',
-            'category': 'category', 
-            '-category': '-category',
-            'rule_type': 'rule_type',
-            '-rule_type': '-rule_type',
-            'is_active': 'is_active',
-            '-is_active': '-is_active',
-            'created_at': 'created_at',
-            '-created_at': '-created_at',
-            'updated_at': 'updated_at',
-            '-updated_at': '-updated_at',
-            'min_population': 'min_population',
-            '-min_population': '-min_population',
-            'max_population': 'max_population',
-            '-max_population': '-max_population',
-            'site_per_population': 'site_per_population',
-            '-site_per_population': '-site_per_population',
-            'base_required_sites': 'base_required_sites',
-            '-base_required_sites': '-base_required_sites',
-            # Related field sorting
-            'name': 'regulatory_rule__name',
-            '-name': '-regulatory_rule__name',
-            'description': 'regulatory_rule__description',
-            '-description': '-regulatory_rule__description',
-        }
-        
-        # Use valid sort field or default
-        sort_field = valid_sort_fields.get(sort_by, '-census_year__year')
-        queryset = queryset.order_by(sort_field)
-
-        # Serialize the filtered and sorted queryset
-        serializer = RegulatoryRuleCensusDataSerializer(queryset, many=True)
-        
-        # Apply pagination
         paginator = self.pagination_class
         paginated_queryset = paginator.paginate_queryset(queryset, request)
         serializer = RegulatoryRuleCensusDataSerializer(paginated_queryset, many=True)
-        
-        # Return the serialized data in the response with pagination metadata
+
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
@@ -123,7 +137,80 @@ class RegulatoryRuleListCreate(APIView):
         # Return validation errors with 400 status
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class RegulatoryRuleDetail(APIView):
+
+class RegulatoryRuleCensusDataExportView(AuthenticatedAPIView):
+    """
+    GET /rules/export/: CSV export of regulatory rule census rows using the same filters as list
+    (search, year, census_year_id, program, category, rule_type, is_active, sort). No pagination.
+    """
+
+    CSV_HEADERS = [
+        'id',
+        'regulatory_rule_id',
+        'regulatory_rule_name',
+        'census_year_id',
+        'census_year',
+        'program',
+        'category',
+        'rule_type',
+        'min_population',
+        'max_population',
+        'site_per_population',
+        'base_required_sites',
+        'event_offset_percentage',
+        'reallocation_percentage',
+        'description',
+        'is_active',
+        'start_date',
+        'end_date',
+        'created_at',
+        'updated_at',
+    ]
+
+    def get(self, request):
+        queryset = RegulatoryRuleCensusData.objects.select_related('regulatory_rule', 'census_year').all()
+        queryset = filter_regulatory_rule_census_queryset(queryset, request.query_params)
+
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(self.CSV_HEADERS)
+        for row in queryset.iterator(chunk_size=500):
+            w.writerow(
+                [
+                    row.id,
+                    str(row.regulatory_rule_id),
+                    row.regulatory_rule.name if row.regulatory_rule_id else '',
+                    row.census_year_id or '',
+                    row.census_year.year if row.census_year_id else '',
+                    row.program,
+                    row.category,
+                    row.rule_type,
+                    row.min_population if row.min_population is not None else '',
+                    row.max_population if row.max_population is not None else '',
+                    str(row.site_per_population) if row.site_per_population is not None else '',
+                    row.base_required_sites if row.base_required_sites is not None else '',
+                    row.event_offset_percentage if row.event_offset_percentage is not None else '',
+                    row.reallocation_percentage if row.reallocation_percentage is not None else '',
+                    (row.description or '').replace('\n', ' ').replace('\r', ''),
+                    'true' if row.is_active else 'false',
+                    row.start_date.isoformat() if row.start_date else '',
+                    row.end_date.isoformat() if row.end_date else '',
+                    row.created_at.isoformat() if row.created_at else '',
+                    row.updated_at.isoformat() if row.updated_at else '',
+                ]
+            )
+        buf.seek(0)
+        fn = f'regulatory_rules_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        resp = HttpResponse(buf.getvalue(), content_type='text/csv; charset=utf-8')
+        resp['Content-Disposition'] = f'attachment; filename="{fn}"'
+        return resp
+
+    def post(self, request):
+        """Allow POST as an alias for GET (some frontends default to POST for exports)."""
+        return self.get(request)
+
+
+class RegulatoryRuleDetail(AuthenticatedAPIView):
     """
     APIView for retrieving, updating, and deleting a specific RegulatoryRuleCensusData.
     

@@ -1,24 +1,141 @@
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q
+from django.http import HttpResponse
 from uuid import UUID
 from .models import Community, CommunityCensusData, CensusYear, AdjacentCommunity
-from .serializers import CommunitySerializer, CommunityCensusDataSerializer, CensusYearSerializer, CensusYearWithDataSerializer, AdjacentCommunitySerializer, AdjacentCommunityReallocationSerializer, MapDataSerializer
+from .serializers import (
+    CommunitySerializer,
+    CommunityCensusDataSerializer,
+    CensusYearSerializer,
+    CensusYearWithDataSerializer,
+    AdjacentCommunitySerializer,
+    AdjacentCommunityReallocationSerializer,
+    MapDataSerializer,
+    CommunityBaseSerializer,
+)
 from .geo_utils import extract_geojson_geometry, normalize_polygon_geojson
 from .spatial_sql import community_ids_touching_polygon
 from .map_serializers import CommunityMapListSerializer
+
+
+class AuthenticatedAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+
+def _request_sort_param(query_params, default='name'):
+    return (
+        query_params.get('sort')
+        or query_params.get('sortBy')
+        or query_params.get('sortby')
+        or query_params.get('sort_by')
+        or query_params.get('ordering')
+        or default
+    )
+
+
+def _mapped_sort(value, allowed, default):
+    raw = str(value or default).strip()
+    descending = raw.startswith('-')
+    key = raw[1:] if descending else raw
+    mapped = allowed.get(key, allowed.get(raw, default))
+    if isinstance(mapped, str) and mapped.startswith('-'):
+        return mapped
+    return f'-{mapped}' if descending else mapped
+
+
+def filter_community_census_queryset(queryset, query_params):
+    """
+    Apply the same filters as ``CommunityCensusDataListCreate`` GET.
+    """
+    qp = query_params
+
+    search = qp.get('search', None)
+    if search:
+        queryset = queryset.filter(Q(community__name__icontains=search))
+
+    year = qp.get('year', None) or qp.get('census_year', None)
+    if year:
+        queryset = queryset.filter(census_year__year=year)
+
+    tier = qp.get('tier', None)
+    if tier:
+        queryset = queryset.filter(tier=tier)
+
+    region = qp.get('region', None)
+    if region:
+        queryset = queryset.filter(region=region)
+
+    zone = qp.get('zone', None)
+    if zone:
+        queryset = queryset.filter(zone=zone)
+
+    province = qp.get('province', None)
+    if province:
+        queryset = queryset.filter(province=province)
+
+    is_active = qp.get('is_active', None)
+    if is_active:
+        is_active_bool = str(is_active).lower() in ['true', '1', 'yes']
+        queryset = queryset.filter(is_active=is_active_bool)
+
+    min_population = qp.get('min_population', None)
+    if min_population:
+        queryset = queryset.filter(population__gte=min_population)
+
+    max_population = qp.get('max_population', None)
+    if max_population:
+        queryset = queryset.filter(population__lte=max_population)
+
+    sort_by = _request_sort_param(qp, 'community__name')
+    valid_sort_fields = {
+        'id': 'id',
+        '-id': '-id',
+        'population': 'population',
+        '-population': '-population',
+        'tier': 'tier',
+        '-tier': '-tier',
+        'region': 'region',
+        '-region': '-region',
+        'zone': 'zone',
+        '-zone': '-zone',
+        'province': 'province',
+        '-province': '-province',
+        'is_active': 'is_active',
+        '-is_active': '-is_active',
+        'created_at': 'created_at',
+        '-created_at': '-created_at',
+        'updated_at': 'updated_at',
+        '-updated_at': '-updated_at',
+        'start_date': 'start_date',
+        '-start_date': '-start_date',
+        'end_date': 'end_date',
+        '-end_date': '-end_date',
+        'name': 'community__name',
+        '-name': '-community__name',
+        'community_name': 'community__name',
+        'community__name': 'community__name',
+        'year': 'census_year__year',
+        '-year': '-census_year__year',
+        'census_year': 'census_year__year',
+        'census_year_value': 'census_year__year',
+    }
+    sort_field = _mapped_sort(sort_by, valid_sort_fields, 'community__name')
+    queryset = queryset.order_by(sort_field)
+    return queryset
 
 
 class CommunityPagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'limit'
     page_query_param = 'page'
-    max_page_size = 100
+    max_page_size = 2000
 
 
-class CommunityListCreate(APIView):
+class CommunityListCreate(AuthenticatedAPIView):
     """
     API for Community static identity with nested census data.
     Returns communities with their census_years as nested arrays.
@@ -53,7 +170,17 @@ class CommunityListCreate(APIView):
             queryset = queryset.filter(census_data__is_active=is_active_bool)
 
         # Sort
-        sort = request.query_params.get('sort', 'name')
+        sort = _mapped_sort(
+            _request_sort_param(request.query_params, 'name'),
+            {
+                'id': 'id',
+                'name': 'name',
+                'community_name': 'name',
+                'created_at': 'created_at',
+                'updated_at': 'updated_at',
+            },
+            'name',
+        )
         queryset = queryset.order_by(sort)
 
         # Pagination
@@ -71,7 +198,77 @@ class CommunityListCreate(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class CommunityCensusDataListCreate(APIView):
+class CommunityBaseListCreate(AuthenticatedAPIView):
+    """CRUD list/create for base Community model (static identity)."""
+    pagination_class = CommunityPagination()
+
+    def get(self, request):
+        queryset = Community.objects.all().prefetch_related('adjacent')
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+
+        sort = _mapped_sort(
+            _request_sort_param(request.query_params, 'name'),
+            {
+                'id': 'id',
+                'name': 'name',
+                'community_name': 'name',
+                'created_at': 'created_at',
+                'updated_at': 'updated_at',
+            },
+            'name',
+        )
+        queryset = queryset.order_by(sort)
+
+        paginator = self.pagination_class
+        paginated = paginator.paginate_queryset(queryset, request)
+        serializer = CommunityBaseSerializer(paginated, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    def post(self, request):
+        serializer = CommunityBaseSerializer(data=request.data)
+        if serializer.is_valid():
+            instance = serializer.save()
+            return Response(CommunityBaseSerializer(instance).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CommunityBaseDetail(AuthenticatedAPIView):
+    """Retrieve, update, delete a Community by UUID."""
+
+    def get_object(self, pk):
+        try:
+            return Community.objects.prefetch_related('adjacent').get(pk=pk)
+        except Community.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({"error": "Community not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(CommunityBaseSerializer(obj).data)
+
+    def put(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({"error": "Community not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = CommunityBaseSerializer(obj, data=request.data, partial=True)
+        if serializer.is_valid():
+            obj = serializer.save()
+            return Response(CommunityBaseSerializer(obj).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        obj = self.get_object(pk)
+        if not obj:
+            return Response({"error": "Community not found"}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response({"message": "Community deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+
+
+class CommunityCensusDataListCreate(AuthenticatedAPIView):
     """
     API for year-specific community data.
     Use this for filtering by population, tier, region, is_active, etc.
@@ -80,85 +277,7 @@ class CommunityCensusDataListCreate(APIView):
 
     def get(self, request):
         queryset = CommunityCensusData.objects.select_related('community', 'census_year').all()
-
-        # Search by community name
-        search = request.query_params.get('search', None)
-        if search:
-            queryset = queryset.filter(Q(community__name__icontains=search))
-
-        # Filters for year-specific data
-        year = request.query_params.get('year', None)
-        if year:
-            queryset = queryset.filter(census_year__year=year)
-
-        tier = request.query_params.get('tier', None)
-        if tier:
-            queryset = queryset.filter(tier=tier)
-
-        region = request.query_params.get('region', None)
-        if region:
-            queryset = queryset.filter(region=region)
-
-        zone = request.query_params.get('zone', None)
-        if zone:
-            queryset = queryset.filter(zone=zone)
-
-        province = request.query_params.get('province', None)
-        if province:
-            queryset = queryset.filter(province=province)
-
-        is_active = request.query_params.get('is_active', None)
-        if is_active:
-            is_active_bool = is_active.lower() in ['true', '1', 'yes']
-            queryset = queryset.filter(is_active=is_active_bool)
-
-        min_population = request.query_params.get('min_population', None)
-        if min_population:
-            queryset = queryset.filter(population__gte=min_population)
-
-        max_population = request.query_params.get('max_population', None)
-        if max_population:
-            queryset = queryset.filter(population__lte=max_population)
-
-        # Sort - handle valid field names
-        sort_by = request.query_params.get('sort', 'community__name')  # Default sort by community name
-        
-        # Map of allowed sort fields to prevent FieldError
-        valid_sort_fields = {
-            # Direct model fields
-            'id': 'id',
-            '-id': '-id',
-            'population': 'population',
-            '-population': '-population',
-            'tier': 'tier',
-            '-tier': '-tier',
-            'region': 'region',
-            '-region': '-region',
-            'zone': 'zone',
-            '-zone': '-zone',
-            'province': 'province',
-            '-province': '-province',
-            'is_active': 'is_active',
-            '-is_active': '-is_active',
-            'created_at': 'created_at',
-            '-created_at': '-created_at',
-            'updated_at': 'updated_at',
-            '-updated_at': '-updated_at',
-            'start_date': 'start_date',
-            '-start_date': '-start_date',
-            'end_date': 'end_date',
-            '-end_date': '-end_date',
-            
-            # Related field sorting
-            'name': 'community__name',
-            '-name': '-community__name',
-            'year': 'census_year__year',
-            '-year': '-census_year__year',
-        }
-        
-        # Use valid sort field or default to 'community__name'
-        sort_field = valid_sort_fields.get(sort_by, 'community__name')
-        queryset = queryset.order_by(sort_field)
+        queryset = filter_community_census_queryset(queryset, request.query_params)
 
         # Pagination
         paginator = self.pagination_class
@@ -174,7 +293,7 @@ class CommunityCensusDataListCreate(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class CommunityDetail(APIView):
+class CommunityDetail(AuthenticatedAPIView):
     """CRUD operations for single census data record"""
     
     def get_object(self, pk):
@@ -211,7 +330,7 @@ class CommunityDetail(APIView):
         return Response({"message": "Census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
-class CommunityCensusDataDetail(APIView):
+class CommunityCensusDataDetail(AuthenticatedAPIView):
     """CRUD operations for year-specific community data"""
     
     def get_object(self, pk):
@@ -248,13 +367,24 @@ class CommunityCensusDataDetail(APIView):
         return Response({"message": "Community census data deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
-class CommunityDropdown(APIView):
+class CommunityDropdown(AuthenticatedAPIView):
     """Community dropdown API returning active communities for a census year"""
 
     def get(self, request):
-        """List active communities filtered by census year"""
+        """List active communities filtered by census year, with optional search and pagination"""
         census_year_id = request.query_params.get('census_year')
         year_value = request.query_params.get('year')
+        search = request.query_params.get('search', '')
+        try:
+            page = int(request.query_params.get('page', 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = int(request.query_params.get('limit', 100))
+        except (TypeError, ValueError):
+            limit = 100
+        page = max(1, page)
+        limit = max(1, min(limit, 2000))
 
         if not census_year_id and not year_value:
             return Response(
@@ -276,22 +406,90 @@ class CommunityDropdown(APIView):
             except (TypeError, ValueError):
                 return Response({"error": "year must be a valid integer"}, status=status.HTTP_400_BAD_REQUEST)
 
-        communities = queryset.values('community__id', 'community__name').distinct().order_by('community__name')
+        if search and str(search).strip():
+            queryset = queryset.filter(community__name__icontains=str(search).strip())
+
+        communities_qs = queryset.values('community__id', 'community__name').distinct().order_by('community__name')
+
+        # Paginate
+        from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
+        paginator = Paginator(communities_qs, limit)
+        try:
+            page_obj = paginator.page(page)
+        except (PageNotAnInteger, EmptyPage):
+            page_obj = paginator.page(1)
 
         results = [
             {
                 'id': str(item['community__id']),
                 'name': item['community__name'],
             }
-            for item in communities
+            for item in page_obj
         ]
 
         return Response({
             'communities': results,
-            'total': len(results)
+            'total': paginator.count,
+            'page': page_obj.number,
+            'limit': limit,
+            'total_pages': paginator.num_pages,
         })
 
-class YearData(APIView):
+
+class CommunityModelDropdown(AuthenticatedAPIView):
+    """Dropdown API for all Communities (model-level) returning id and name.
+
+    Optional query params:
+    - search: substring match on community name
+    - page: page number (default 1)
+    - limit: page size (default 100, max 2000)
+    """
+
+    def get(self, request):
+        search = request.query_params.get('search', '')
+        try:
+            page = int(request.query_params.get('page', 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            limit = int(request.query_params.get('limit', 100))
+        except (TypeError, ValueError):
+            limit = 100
+        page = max(1, page)
+        limit = max(1, min(limit, 2000))
+
+        qs = Community.objects.all().order_by('name')
+        if search and str(search).strip():
+            qs = qs.filter(name__icontains=str(search).strip())
+
+        # Only select required fields
+        qs = qs.values('id', 'name')
+
+        # Paginate
+        from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
+        paginator = Paginator(qs, limit)
+        try:
+            page_obj = paginator.page(page)
+        except (PageNotAnInteger, EmptyPage):
+            page_obj = paginator.page(1)
+
+        results = [
+            {
+                'id': str(item['id']),
+                'name': item['name'],
+            }
+            for item in page_obj
+        ]
+
+        return Response({
+            'communities': results,
+            'total': paginator.count,
+            'page': page_obj.number,
+            'limit': limit,
+            'total_pages': paginator.num_pages,
+        })
+
+class YearData(AuthenticatedAPIView):
     """
     API for Year data with pagination.
     Returns paginated year list.
@@ -308,7 +506,7 @@ class YearData(APIView):
         ]
         return paginator.get_paginated_response(years)
 
-class YearDropdown(APIView):
+class YearDropdown(AuthenticatedAPIView):
     """
     API for Year dropdown with CRUD operations.
     Returns simple year list for dropdowns and supports full CRUD.
@@ -370,7 +568,7 @@ class YearDropdown(APIView):
         }, status=status.HTTP_204_NO_CONTENT)
 
 
-class CensusYearListCreate(APIView):
+class CensusYearListCreate(AuthenticatedAPIView):
     pagination_class = CommunityPagination()
 
     def get(self, request):
@@ -401,7 +599,7 @@ class CensusYearListCreate(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class CensusYearDetail(APIView):
+class CensusYearDetail(AuthenticatedAPIView):
     """CRUD operations for individual census year"""
     
     def get_object(self, pk):
@@ -438,7 +636,7 @@ class CensusYearDetail(APIView):
         return Response({"message": "Census year deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
-class AdjacentCommunityReallocationListCreate(APIView):
+class AdjacentCommunityReallocationListCreate(AuthenticatedAPIView):
     """List all adjacent communities with reallocation data or create new ones"""
 
     def get(self, request):
@@ -476,7 +674,7 @@ class AdjacentCommunityReallocationListCreate(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class AdjacentCommunityReallocationDetail(APIView):
+class AdjacentCommunityReallocationDetail(AuthenticatedAPIView):
     """Get detailed reallocation information for a specific adjacency"""
 
     def get_object(self, pk):
@@ -532,7 +730,7 @@ from datetime import datetime
 from rest_framework.parsers import MultiPartParser, FormParser
 
 
-class CommunityCensusDataImportExport(APIView):
+class CommunityCensusDataImportExport(AuthenticatedAPIView):
     """
     API for importing and exporting CommunityCensusData via CSV.
     
@@ -543,21 +741,22 @@ class CommunityCensusDataImportExport(APIView):
 
     # Expected CSV headers
     CSV_HEADERS = [
+        'community_id', 'community_name', 'census_year', 'population', 'tier',
+        'region', 'zone', 'province', 'is_active',
+        'start_date', 'end_date'
+    ]
+    REQUIRED_CSV_HEADERS = [
         'community_name', 'census_year', 'population', 'tier',
         'region', 'zone', 'province', 'is_active',
         'start_date', 'end_date'
     ]
 
     def get(self, request):
-        """Export CommunityCensusData to CSV"""
-        census_year_param = request.query_params.get('census_year')
-        
+        """Export CommunityCensusData to CSV using the same filters as ``CommunityCensusDataListCreate``."""
         queryset = CommunityCensusData.objects.select_related(
             'community', 'census_year'
         ).all()
-        
-        if census_year_param:
-            queryset = queryset.filter(census_year__year=census_year_param)
+        queryset = filter_community_census_queryset(queryset, request.query_params)
         
         # Create CSV response
         output = io.StringIO()
@@ -569,6 +768,7 @@ class CommunityCensusDataImportExport(APIView):
         # Write data rows
         for data in queryset:
             row = [
+                str(data.community.id),
                 data.community.name,
                 data.census_year.year,
                 data.population,
@@ -582,24 +782,19 @@ class CommunityCensusDataImportExport(APIView):
             ]
             writer.writerow(row)
         
-        # Prepare response
         output.seek(0)
-        response = Response(
-            output.getvalue(),
-            content_type='text/csv'
-        )
-        response['Content-Disposition'] = f'attachment; filename="community_census_data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv"'
+        fn = f'community_census_data_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{fn}"'
         return response
 
     def post(self, request):
-        """Import CommunityCensusData from CSV file"""
+        """Import CommunityCensusData from CSV file, or export if no file is provided."""
         csv_file = request.FILES.get('file')
-        
+
         if not csv_file:
-            return Response(
-                {'error': 'No file provided. Please upload a CSV file.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            # No file → treat as export request (some frontends POST for exports)
+            return self.get(request)
         
         if not csv_file.name.endswith('.csv'):
             return Response(
@@ -624,7 +819,7 @@ class CommunityCensusDataImportExport(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        missing_headers = set(self.CSV_HEADERS) - set(reader.fieldnames)
+        missing_headers = set(self.REQUIRED_CSV_HEADERS) - set(reader.fieldnames)
         if missing_headers:
             return Response(
                 {
@@ -680,6 +875,17 @@ class CommunityCensusDataImportExport(APIView):
         errors = []
         
         # Required field validations
+        community_id = row.get('community_id', '').strip()
+        if community_id:
+            try:
+                UUID(community_id)
+            except (ValueError, TypeError):
+                errors.append({
+                    'row': row_number,
+                    'field': 'community_id',
+                    'error': f'Invalid community_id: "{community_id}". Must be a valid UUID.'
+                })
+
         community_name = row.get('community_name', '').strip()
         if not community_name:
             errors.append({
@@ -835,6 +1041,7 @@ class CommunityCensusDataImportExport(APIView):
     
     def _import_row(self, row):
         """Import a single validated row. Returns 'created', 'updated', or raises exception."""
+        community_id = row.get('community_id', '').strip()
         community_name = row['community_name'].strip()
         census_year = int(row['census_year'].strip())
         population = int(row['population'].strip())
@@ -856,8 +1063,32 @@ class CommunityCensusDataImportExport(APIView):
         if row.get('end_date', '').strip():
             end_date = datetime.fromisoformat(row['end_date'].strip().replace('Z', '+00:00'))
         
-        # Get or create community
-        community, _ = Community.objects.get_or_create(name=community_name)
+        # If community_id is supplied, it is the stable identity for updates.
+        # If omitted, create a brand-new community; do not silently update by name.
+        if community_id:
+            community_uuid = UUID(community_id)
+            community = Community.objects.filter(id=community_uuid).first()
+            if community:
+                if community.name != community_name:
+                    if Community.objects.exclude(id=community.id).filter(name=community_name).exists():
+                        raise ValueError(
+                            f'Cannot rename community {community_id} to "{community_name}" because that name already exists.'
+                        )
+                    community.name = community_name
+                    community.save(update_fields=['name', 'updated_at'])
+            else:
+                if Community.objects.filter(name=community_name).exists():
+                    raise ValueError(
+                        f'Cannot create community id {community_id} with name "{community_name}" because that name already exists.'
+                    )
+                community = Community.objects.create(id=community_uuid, name=community_name)
+        else:
+            if Community.objects.filter(name=community_name).exists():
+                raise ValueError(
+                    f'community_id is required to update existing community "{community_name}". '
+                    'Leave community_id blank only when creating a new community.'
+                )
+            community = Community.objects.create(name=community_name)
         
         # Get census year object
         census_year_obj = CensusYear.objects.get(year=census_year)
@@ -897,7 +1128,21 @@ class CommunityCensusDataImportExport(APIView):
             return 'created'
 
 
-class CommunityCensusDataImportTemplate(APIView):
+def _load_community_csv_template(filename: str) -> str | None:
+    """Prefer ``staticfiles/templates``, then ``static/templates`` (same as site template API)."""
+    import os
+
+    from django.conf import settings
+
+    for root in ('staticfiles', 'static'):
+        path = os.path.join(settings.BASE_DIR, root, 'templates', filename)
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+    return None
+
+
+class CommunityCensusDataImportTemplate(AuthenticatedAPIView):
     """
     API to download a CSV template for importing CommunityCensusData.
     """
@@ -905,31 +1150,24 @@ class CommunityCensusDataImportTemplate(APIView):
     def get(self, request):
         """Download CSV template with sample data from file"""
         try:
-            # Read from static/templates directory
-            import os
-            from django.conf import settings
-            
-            template_path = os.path.join(settings.BASE_DIR, 'static', 'templates', 'community_census_data_template.csv')
-            if os.path.exists(template_path):
-                with open(template_path, 'r', encoding='utf-8') as f:
-                    csv_content = f.read()
-            else:
+            csv_content = _load_community_csv_template('community_census_data_template.csv')
+            if not csv_content:
                 raise FileNotFoundError("Template file not found")
                 
-        except Exception as e:
+        except Exception:
             # Fallback to hardcoded template if file not found
             import csv
             import io
             
             headers = [
-                'community_name', 'census_year', 'population', 'tier',
+                'community_id', 'community_name', 'census_year', 'population', 'tier',
                 'region', 'zone', 'province', 'is_active',
                 'start_date', 'end_date'
             ]
             sample_data = [
-                ['Toronto', '2030', '2930000', 'Tier 1', 'Central', 'Zone A', 'Ontario', 'true', '2030-01-01T00:00:00', ''],
-                ['Vancouver', '2030', '675218', 'Tier 1', 'West', 'Zone B', 'British Columbia', 'true', '2030-01-01T00:00:00', ''],
-                ['Montreal', '2030', '1762949', 'Tier 1', 'East', 'Zone C', 'Quebec', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Toronto', '2030', '2930000', 'Tier 1', 'Central', 'Zone A', 'Ontario', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Vancouver', '2030', '675218', 'Tier 1', 'West', 'Zone B', 'British Columbia', 'true', '2030-01-01T00:00:00', ''],
+                ['', 'Montreal', '2030', '1762949', 'Tier 1', 'East', 'Zone C', 'Quebec', 'true', '2030-01-01T00:00:00', ''],
             ]
             
             output = io.StringIO()
@@ -952,7 +1190,7 @@ class CommunityCensusDataImportTemplate(APIView):
         return response
 
 
-class MapDataView(APIView):
+class MapDataView(AuthenticatedAPIView):
     """API view for map data providing sites and municipalities for the React component"""
 
     def get(self, request):
@@ -961,7 +1199,7 @@ class MapDataView(APIView):
         return Response(serializer.data)
 
 
-class MapFilterOptionsView(APIView):
+class MapFilterOptionsView(AuthenticatedAPIView):
     """API view to get all available filter options for map data"""
 
     def get(self, request):
@@ -995,7 +1233,7 @@ class MapFilterOptionsView(APIView):
         community_names = sites_queryset.exclude(community__isnull=True).values_list('community__name', flat=True).distinct().order_by('community__name')
 
         # Get unique site names (for search suggestions)
-        site_names = sites_queryset.values_list('site__site_name', flat=True).distinct().order_by('site__site_name')[:100]  # Limit to 100 for performance
+        site_names = sites_queryset.values_list('site__site_name', flat=True).distinct().order_by('site__site_name')[:2000]  # Limit to 100 for performance
 
         # Get programs (from model choices)
         programs = ['Paint', 'Lighting', 'Solvents', 'Pesticides', 'Fertilizers']
@@ -1027,7 +1265,7 @@ def _save_community_map_boundary(community, geom_dict):
     return neighbor_ids
 
 
-class CommunityMapAvailableForAssignment(APIView):
+class CommunityMapAvailableForAssignment(AuthenticatedAPIView):
     """
     Communities that already exist in the DB — use `id` as `community_id` when POSTing a drawn boundary.
 
@@ -1041,9 +1279,9 @@ class CommunityMapAvailableForAssignment(APIView):
             qs = qs.filter(name__icontains=str(search).strip())
 
         try:
-            limit = int(request.query_params.get('limit', 500))
+            limit = int(request.query_params.get('limit', 2000))
         except (TypeError, ValueError):
-            limit = 500
+            limit = 2000
         limit = max(1, min(limit, 2000))
 
         total = qs.count()
@@ -1065,7 +1303,7 @@ class CommunityMapAvailableForAssignment(APIView):
         )
 
 
-class CommunityMapBoundaryListCreate(APIView):
+class CommunityMapBoundaryListCreate(AuthenticatedAPIView):
     """
     Leaflet / map flow: list communities with boundaries, or POST GeoJSON.
 
@@ -1163,7 +1401,7 @@ class CommunityMapBoundaryListCreate(APIView):
         )
 
 
-class CommunityMapBoundaryDetail(APIView):
+class CommunityMapBoundaryDetail(AuthenticatedAPIView):
     """
     Single community map geometry by UUID in the URL.
 

@@ -79,13 +79,17 @@ class AdjacentCommunityReallocationSerializer(serializers.ModelSerializer):
         ).first()
 
         if compliance:
+            from complaince.utils import compliance_rate_percentage
+
             return {
                 'program': compliance.program,
                 'required_sites': compliance.required_sites,
                 'actual_sites': compliance.actual_sites,
                 'shortfall': compliance.shortfall,
                 'excess': compliance.excess,
-                'compliance_rate': str(compliance.compliance_rate),
+                'compliance_rate': compliance_rate_percentage(
+                    compliance.actual_sites, compliance.required_sites
+                ),
                 'calculation_date': compliance.calculation_date
             }
         return None
@@ -204,6 +208,45 @@ class CommunitySerializer(serializers.ModelSerializer):
                 'updated_at': census_data.updated_at,
             })
         return census_years_list
+
+
+class CommunityBaseSerializer(serializers.ModelSerializer):
+    """Basic serializer for CRUD on Community model (static identity only)."""
+    adjacent = serializers.SerializerMethodField()
+    adjacent_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False,
+        allow_empty=True,
+        help_text='List of adjacent community UUIDs to set on create/update.'
+    )
+
+    class Meta:
+        model = Community
+        fields = ['id', 'name', 'boundary', 'adjacent', 'adjacent_ids', 'created_at', 'updated_at']
+
+    def get_adjacent(self, obj):
+        return [
+            {
+                'id': str(comm.id),
+                'name': comm.name,
+            }
+            for comm in obj.adjacent.all()
+        ]
+
+    def create(self, validated_data):
+        adjacent_ids = validated_data.pop('adjacent_ids', [])
+        instance = super().create(validated_data)
+        if adjacent_ids:
+            instance.adjacent.set(adjacent_ids)
+        return instance
+
+    def update(self, instance, validated_data):
+        adjacent_ids = validated_data.pop('adjacent_ids', None)
+        instance = super().update(instance, validated_data)
+        if adjacent_ids is not None:
+            instance.adjacent.set(adjacent_ids)
+        return instance
 
 
 class CommunityCensusDataSerializer(serializers.ModelSerializer):
@@ -352,7 +395,7 @@ class MapDataSerializer(serializers.Serializer):
 
         parsed_filters = {}
         for key, value in filters.items():
-            if key in ['operator_types', 'site_types', 'municipalities', 'status', 'programs']:
+            if key in ['operator_types', 'site_types', 'municipalities', 'communities', 'status', 'programs']:
                 parsed_filters[key] = parse_list_filter(value)
             else:
                 parsed_filters[key] = value
@@ -379,10 +422,16 @@ class MapDataSerializer(serializers.Serializer):
             is_active=True
         ).select_related('community')
 
-        # Apply search filter to municipalities if provided
+        # Apply search filter to municipalities if provided (legacy text search)
         if parsed_filters.get('search'):
             municipalities_queryset = municipalities_queryset.filter(
                 community__name__icontains=parsed_filters['search']
+            )
+        # Apply dropdown-style community filter (by community UUID)
+        communities_filter = parsed_filters.get('communities') or parsed_filters.get('municipalities')
+        if communities_filter:
+            municipalities_queryset = municipalities_queryset.filter(
+                community__id__in=communities_filter
             )
 
         municipalities_data = []
@@ -393,8 +442,8 @@ class MapDataSerializer(serializers.Serializer):
             try:
                 municipalities_page = int(parsed_filters['municipalities_page'])
                 municipalities_limit = int(parsed_filters['municipalities_limit'])
-                if municipalities_limit > 100:  # Max limit
-                    municipalities_limit = 100
+                if municipalities_limit > 2000:  # Max limit
+                    municipalities_limit = 2000
                 if municipalities_limit < 1:
                     municipalities_limit = 1
                 if municipalities_page < 1:
@@ -419,6 +468,7 @@ class MapDataSerializer(serializers.Serializer):
                 'name': community_data.community.name,
                 'tier': community_data.tier or 'Unknown',
                 'population': community_data.population or 0,
+                'boundary': community_data.community.boundary,
             })
 
         # Get sites for this census year
@@ -428,6 +478,10 @@ class MapDataSerializer(serializers.Serializer):
         )
 
         # Apply filters
+        # Dropdown-style community filter (accepts both 'communities' and legacy 'municipalities')
+        communities_filter = parsed_filters.get('communities') or parsed_filters.get('municipalities')
+        if communities_filter:
+            sites_queryset = sites_queryset.filter(community__id__in=communities_filter)
         if parsed_filters.get('search'):
             search_query = parsed_filters['search']
             sites_queryset = sites_queryset.filter(
@@ -440,8 +494,15 @@ class MapDataSerializer(serializers.Serializer):
         if parsed_filters.get('operator_types'):
             sites_queryset = sites_queryset.filter(operator_type__in=parsed_filters['operator_types'])
 
-        if parsed_filters.get('municipalities'):
-            sites_queryset = sites_queryset.filter(community__name__in=parsed_filters['municipalities'])
+        # Backward compatibility: explicit municipalities filter
+        if parsed_filters.get('municipalities') and not communities_filter:
+            sites_queryset = sites_queryset.filter(community__id__in=parsed_filters['municipalities'])
+
+        # Compute overall counts BEFORE applying status filter so the response
+        # always shows active / inactive / total regardless of the status param.
+        sites_count_active = sites_queryset.filter(is_active=True).count()
+        sites_count_inactive = sites_queryset.filter(is_active=False).count()
+        sites_count_total = sites_count_active + sites_count_inactive
 
         if parsed_filters.get('status'):
             status_filters = []
@@ -477,8 +538,8 @@ class MapDataSerializer(serializers.Serializer):
             try:
                 page = int(parsed_filters['page'])
                 limit = int(parsed_filters['limit'])
-                if limit > 100:  # Max limit
-                    limit = 100
+                if limit > 1000:  # Max limit
+                    limit = 1000
                 if limit < 1:
                     limit = 1
                 if page < 1:
@@ -490,7 +551,10 @@ class MapDataSerializer(serializers.Serializer):
                     'page': paginated_sites.number,
                     'limit': limit,
                     'total': paginator.count,
-                    'total_pages': paginator.num_pages
+                    'total_pages': paginator.num_pages,
+                    'total_active': sites_count_active,
+                    'total_inactive': sites_count_inactive,
+                    'total_overall': sites_count_total,
                 }
             except (PageNotAnInteger, EmptyPage, ValueError):
                 paginated_sites = sites_queryset

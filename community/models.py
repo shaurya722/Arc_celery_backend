@@ -236,8 +236,8 @@ class CommunityCensusData(models.Model):
         return f"{self.community.name} - {self.census_year.year}"
     
     def save(self, *args, **kwargs):
-        # Auto-deactivate if end date has passed
-        if self.end_date and self.end_date < timezone.now():
+        # Auto-deactivate when end time is reached (matches periodic expiry task).
+        if self.end_date and self.end_date <= timezone.now():
             self.is_active = False
         super().save(*args, **kwargs)
 

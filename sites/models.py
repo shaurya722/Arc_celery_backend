@@ -1,15 +1,27 @@
-from django.db import models
 import uuid
+
+from django.db import models
 from django.utils import timezone
+
+
+def _default_site_id():
+    """String PK so ORM SQL params match ``varchar`` ``sites_site.id`` (see migration 0005)."""
+    return str(uuid.uuid4())
 
 
 class Site(models.Model):
     """
     Site - Static identity only.
-    Stores only the site name and basic unchanging information.
+    Primary key is a string (UUID hex by default) matching the database column type.
     All year-specific data is stored in SiteCensusData.
     """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.CharField(
+        max_length=100,
+        primary_key=True,
+        default=_default_site_id,
+        editable=True,
+        help_text='Business / API site identifier (e.g. import Site ID).',
+    )
     site_name = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -130,7 +142,6 @@ class SiteCensusData(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = ('site', 'census_year')
         verbose_name = "Site Census Data"
         verbose_name_plural = "Site Census Data"
         ordering = ['-census_year__year', 'site__site_name']
@@ -186,29 +197,64 @@ class SiteCensusData(models.Model):
             self.program_fertilizers_start_date = None
             self.program_fertilizers_end_date = None
         
-        # Auto-deactivate if end date has passed
-        if self.site_end_date and self.site_end_date < timezone.now():
+        # Auto-deactivate when site end time is reached (matches bulk expiry task).
+        if self.site_end_date and self.site_end_date <= timezone.now():
             self.is_active = False
+            self.event_approved = False
+            self.program_paint = False
+            self.program_lights = False
+            self.program_solvents = False
+            self.program_pesticides = False
+            self.program_fertilizers = False
         
         super().save(*args, **kwargs)
     
     @property
     def effective_community(self):
         """
-        Returns the effective community after considering reallocations.
-        If site has been reallocated, returns the latest destination community.
-        Otherwise, returns the original community.
+        Backwards-compatible alias for ``self.community``.
+
+        Reallocations are tracked per-program in ``SiteReallocation.program`` and
+        do NOT move ``self.community``. Use ``effective_community_for_program``
+        to resolve where a single program is currently counted for compliance.
         """
-        latest_reallocation = self.reallocations.order_by('-reallocated_at').first()
-        return latest_reallocation.to_community if latest_reallocation else self.community
+        return self.community
+
+    def effective_community_for_program(self, program):
+        """
+        Effective community for ``program`` after per-program reallocations.
+
+        Returns the latest ``SiteReallocation.to_community`` whose ``program``
+        matches; otherwise the site's ``community`` FK (unchanged by reallocation).
+        """
+        if not program:
+            return self.community
+        latest = (
+            self.reallocations.filter(program=program)
+            .order_by('-reallocated_at')
+            .first()
+        )
+        return latest.to_community if latest else self.community
 
 
 class SiteReallocation(models.Model):
     """
-    Tracks adjacent reallocation history from one community to another.
-    SiteReallocationService creates these records and keeps SiteCensusData.community
-    in sync with the latest allocation for compliance and listings.
+    Tracks adjacent reallocation history per program from one community to another.
+
+    A site that participates in multiple programs (e.g. paint + lighting + solvents)
+    can have its programs reallocated independently. Each ``SiteReallocation`` row
+    records the move of ONE program for that site. ``SiteCensusData.community`` is
+    NOT changed by reallocation; per-program ownership is computed from these rows
+    in ``complaince.utils.count_actual_sites``.
     """
+    PROGRAM_CHOICES = [
+        ('Paint', 'Paint'),
+        ('Lighting', 'Lighting'),
+        ('Solvents', 'Solvents'),
+        ('Pesticides', 'Pesticides'),
+        ('Fertilizers', 'Fertilizers'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
     site_census_data = models.ForeignKey(
@@ -234,7 +280,19 @@ class SiteReallocation(models.Model):
         on_delete=models.CASCADE,
         related_name='site_reallocations'
     )
-    
+
+    program = models.CharField(
+        max_length=20,
+        choices=PROGRAM_CHOICES,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            'Program that was reallocated. Each reallocation row moves a single '
+            'program; older rows created before per-program tracking may be NULL.'
+        ),
+    )
+
     reallocated_at = models.DateTimeField(auto_now_add=True)
     
     created_by = models.ForeignKey(
@@ -255,6 +313,16 @@ class SiteReallocation(models.Model):
             models.Index(fields=['from_community', 'census_year']),
             models.Index(fields=['to_community', 'census_year']),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['site_census_data', 'census_year', 'from_community', 'to_community', 'program'],
+                name='uniq_sitereallocation_site_year_route_program',
+            ),
+        ]
     
     def __str__(self):
-        return f"{self.site_census_data.site.site_name}: {self.from_community.name} → {self.to_community.name}"
+        prog = self.program or 'all'
+        return (
+            f"{self.site_census_data.site.site_name} [{prog}]: "
+            f"{self.from_community.name} → {self.to_community.name}"
+        )

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 from decouple import config, Csv
 import os
@@ -40,13 +41,15 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'django_filters',
     'corsheaders',
+    'accounts.apps.AccountsConfig',
     "regulatory_rules",
     'community.apps.CommunityConfig',
     'sites.apps.SitesConfig',
     'complaince',
-    'test_check',
     'django_celery_beat',
     'drf_spectacular',
 ]
@@ -68,7 +71,44 @@ ROOT_URLCONF = 'arc_backend.urls'
 # REST Framework settings
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'accounts.authentication.BlacklistAwareJWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=config('JWT_ACCESS_DAYS', default=1, cast=int)),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=config('JWT_REFRESH_DAYS', default=7, cast=int)),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'UPDATE_LAST_LOGIN': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Arc Backend API',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+}
+
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='webmaster@localhost')
+EMAIL_BACKEND = config(
+    'EMAIL_BACKEND',
+    default='django.core.mail.backends.console.EmailBackend',
+)
+FRONTEND_PASSWORD_RESET_BASE = config(
+    'FRONTEND_PASSWORD_RESET_BASE',
+    default='',
+)
+PASSWORD_RESET_EMAIL_SUBJECT = config(
+    'PASSWORD_RESET_EMAIL_SUBJECT',
+    default='Password reset',
+)
 
 TEMPLATES = [
     {
@@ -187,9 +227,39 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'Asia/Kolkata'
 CELERY_ENABLE_UTC = False
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+# Local dev without Redis + celery worker: run tasks in-process so compliance signals persist data.
+CELERY_TASK_ALWAYS_EAGER = config('CELERY_TASK_ALWAYS_EAGER', default=False, cast=bool)
+CELERY_TASK_EAGER_PROPAGATES = config('CELERY_TASK_EAGER_PROPAGATES', default=True, cast=bool)
 
-# Logging Configuration
+# Logging: Serverless platforms like Vercel mount the deployment under a read-only tree (/var/task).
+# A FileHandler writing to BASE_DIR/celery_logs.log fails at import with OSError 30 (read-only fs).
 CELERY_LOG_FILE = BASE_DIR / 'celery_logs.log'
+_is_serverless = (
+    bool(os.environ.get('VERCEL')) or
+    bool(os.environ.get('VERCEL_ENV')) or
+    bool(os.environ.get('AWS_LAMBDA_FUNCTION_NAME')) or
+    str(BASE_DIR).startswith('/var/task')  # Vercel specific
+)
+_file_logging_opt_in = config('DJANGO_FILE_LOGGING', default=False, cast=bool)
+_use_file_log = (not _is_serverless) and _file_logging_opt_in  # Only enable if explicitly opted in AND not serverless
+_log_file_path = (Path('/tmp') / 'celery_logs.log') if _is_serverless else CELERY_LOG_FILE
+
+_handlers = {
+    'console': {
+        'level': 'INFO',
+        'class': 'logging.StreamHandler',
+        'formatter': 'verbose',
+    },
+}
+_task_handlers = ['console']
+if _use_file_log:
+    _handlers['celery_file'] = {
+        'level': 'INFO',
+        'class': 'logging.FileHandler',
+        'filename': str(_log_file_path),
+        'formatter': 'verbose',
+    }
+    _task_handlers = ['console', 'celery_file']
 
 LOGGING = {
     'version': 1,
@@ -200,32 +270,20 @@ LOGGING = {
             'style': '{',
         },
     },
-    'handlers': {
-        'console': {
-            'level': 'INFO',
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-        'celery_file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': str(CELERY_LOG_FILE),
-            'formatter': 'verbose',
-        },
-    },
+    'handlers': _handlers,
     'loggers': {
         'complaince.tasks': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
         'complaince.signals': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
         'regulatory_rules.tasks': {
-            'handlers': ['console', 'celery_file'],
+            'handlers': list(_task_handlers),
             'level': 'INFO',
             'propagate': False,
         },
